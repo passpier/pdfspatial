@@ -6,9 +6,14 @@ A closed-loop, four-stage pipeline for turning PDFs into Markdown, grounded in s
 Google's PDFium engine.
 
 This repository currently ships one crate, [`pdfspatial-core`](crates/pdfspatial-core),
-implementing **Stage 1** of the pipeline. Stages 2-4 are represented as documented,
-`unimplemented!()` function signatures so the crate's public shape already matches where
-the project is going.
+implementing **Stage 1** in full and the **algorithmic core of Stages 2 and 4**:
+validation metrics, a deterministic heuristic layout classifier, column-aware
+reading-order assembly, and structural Markdown output — all pure, dependency-free Rust.
+The one piece still unimplemented is the vision-model layout detector the roadmap
+describes for Stage 2/4b (an ONNX RT-DETR-style detector over rendered page rasters,
+needed for `Table`/`Picture`/`Formula` classes); it remains a documented
+`unimplemented!()` stub since it needs an inference runtime, model weights, and a
+DocLayNet-backed evaluation harness that are out of scope for this pass.
 
 ## The four-stage loop
 
@@ -21,19 +26,23 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    floor built directly on PDFium's native text layer: char → word → line → block
    grouping via geometric heuristics only (no ML). See
    [`crates/pdfspatial-core/src/extract.rs`](crates/pdfspatial-core/src/extract.rs).
-2. **Validation** (stubbed) — score structural fidelity (TEDS, TEDS(IOU), GIoU, region
-   F1) against held-out layout ground truth such as
+2. **Validation** (metrics implemented; no dataset harness yet) — score structural
+   fidelity: TEDS, TEDS(IOU), and TEDS-Struct (via a restricted table-HTML parser and a
+   Zhang–Shasha tree-edit-distance implementation), plus GIoU and per-class region F1.
+   Not yet wired up against a held-out dataset such as
    [DocLayNet](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1). See
-   [`metrics.rs`](crates/pdfspatial-core/src/metrics.rs) and
-   [`layout.rs`](crates/pdfspatial-core/src/layout.rs).
+   [`metrics.rs`](crates/pdfspatial-core/src/metrics.rs).
 3. **Error analysis** (stubbed) — cluster Stage 2 shortfalls into a reproducible
    failure-mode taxonomy (multi-column gutters, footnotes, cross-page tables, ...), each
    tied to a minimal-repro regression fixture. See
    [`assemble.rs`](crates/pdfspatial-core/src/assemble.rs) for the full pitfall
    checklist this stage organizes around.
-4. **Refinement** (stubbed) — close the gaps found in Stage 3, heuristics first,
-   targeted model fine-tuning second, validated against the Stage 3 regression corpus
-   before each full Stage 2 re-run.
+4. **Refinement** (heuristics implemented; fine-tuning stubbed) — [`layout.rs`](crates/pdfspatial-core/src/layout.rs)
+   classifies regions with deterministic text-layer heuristics (Title, SectionHeader,
+   ListItem, Caption, PageHeader/Footer, Text — `Table`/`Picture`/`Formula` need the
+   still-unimplemented ONNX detector) and [`assemble.rs`](crates/pdfspatial-core/src/assemble.rs)
+   reorders blocks via column-aware XY-cut recursion. Targeted model fine-tuning,
+   validated against a Stage 3 regression corpus, remains future work.
 
 After Stage 4, the loop returns to Stage 2 on a fresh held-out split — this is a
 continuous cycle, not a linear pipeline.
@@ -92,7 +101,13 @@ Stage 1's integration tests (`crates/pdfspatial-core/tests/stage1_baseline.rs`) 
 small, hand-authored, dependency-free fixture PDF
 (`crates/pdfspatial-core/tests/fixtures/single_column.pdf`) and assert both roadmap
 targets — char recall ≥ 99%, line-grouping accuracy ≥ 95% — against its known ground
-truth.
+truth. These require the native PDFium library, as shown above.
+
+Stage 2/4's integration test (`crates/pdfspatial-core/tests/stage2_pipeline.rs`)
+constructs a synthetic multi-column `Document` in code and runs it through
+`classify_regions` → `assemble_reading_order` → `to_markdown_structured`. It needs no
+PDF and no PDFium library, so a plain `cargo test` (no environment variable required)
+exercises it.
 
 ## Project layout
 

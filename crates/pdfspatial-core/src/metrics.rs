@@ -1,11 +1,16 @@
 //! Validation metrics for every stage of the pipeline.
 //!
-//! [`char_recall`] and [`line_grouping_accuracy`] are implemented and back the Stage 1
-//! unit tests in this crate, matching the roadmap's Stage 1 metric table exactly
-//! (character extraction recall ≥ 99%, line-grouping accuracy ≥ 95% on single-column
-//! documents). Everything else here — TEDS, TEDS(IOU), and GIoU/region-F1 — is a Stage
-//! 2/4 stub: the function shapes are fixed so downstream code can be written against a
-//! stable API, but the bodies are not yet implemented.
+//! [`char_recall`] and [`line_grouping_accuracy`] back the Stage 1 unit tests in this
+//! crate, matching the roadmap's Stage 1 metric table exactly (character extraction
+//! recall ≥ 99%, line-grouping accuracy ≥ 95% on single-column documents).
+//!
+//! [`iou`], [`giou`], and [`region_f1`] implement the roadmap's Stage 2 region-level
+//! metrics (mean GIoU, per-class F1 at a COCO-style IoU threshold). The TEDS family
+//! ([`teds_struct`], [`teds`], [`teds_iou`]) implements the roadmap's table-structure
+//! metrics on a restricted table-HTML dialect, backed by a private Zhang–Shasha
+//! tree-edit-distance implementation (see the `teds` submodule). None of these are wired
+//! to a real DocLayNet/PubTabNet harness yet — that dataset-loading work is separate from
+//! the pure scoring functions implemented here.
 
 use crate::BBox;
 use std::collections::HashMap;
@@ -85,59 +90,586 @@ pub fn line_grouping_accuracy(extracted_lines: &[String], ground_truth_lines: &[
     matched as f32 / ground_truth_lines.len() as f32
 }
 
+/// Area of a [`BBox`], in square points. Never negative (mirrors [`BBox::width`]/
+/// [`BBox::height`]).
+fn area(b: BBox) -> f32 {
+    b.width() * b.height()
+}
+
+/// Area of the intersection of two [`BBox`]es, or `0.0` if they don't overlap.
+fn intersection_area(a: BBox, b: BBox) -> f32 {
+    let left = a.left.max(b.left);
+    let right = a.right.min(b.right);
+    let bottom = a.bottom.max(b.bottom);
+    let top = a.top.min(b.top);
+    (right - left).max(0.0) * (top - bottom).max(0.0)
+}
+
+/// Standard Intersection-over-Union between two bounding boxes, in `[0.0, 1.0]`.
+///
+/// Returns `0.0` if both boxes are degenerate (zero area) and disjoint; used by
+/// [`region_f1`] for COCO-style matching and by [`teds_iou`] to score bbox-annotated
+/// table cells.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::BBox;
+/// use pdfspatial_core::metrics::iou;
+///
+/// let a = BBox { left: 0.0, bottom: 0.0, right: 10.0, top: 10.0 };
+/// assert_eq!(iou(a, a), 1.0);
+///
+/// let disjoint = BBox { left: 20.0, bottom: 20.0, right: 30.0, top: 30.0 };
+/// assert_eq!(iou(a, disjoint), 0.0);
+/// ```
+pub fn iou(a: BBox, b: BBox) -> f32 {
+    let intersection = intersection_area(a, b);
+    let union = area(a) + area(b) - intersection;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+/// Generalized IoU between a predicted and ground-truth bounding box, in `[-1.0, 1.0]`.
+///
+/// Unlike plain IoU, GIoU stays informative for non-overlapping boxes via a penalty term
+/// based on the smallest enclosing box — important for early-epoch layout models that
+/// may predict boxes with no overlap at all. See Rezatofighi et al., "Generalized
+/// Intersection over Union" (CVPR 2019).
+///
+/// Returns `0.0` if the enclosing box is degenerate (both inputs zero-area at the same
+/// point).
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::BBox;
+/// use pdfspatial_core::metrics::giou;
+///
+/// let a = BBox { left: 0.0, bottom: 0.0, right: 10.0, top: 10.0 };
+/// assert_eq!(giou(a, a), 1.0);
+///
+/// let disjoint = BBox { left: 20.0, bottom: 0.0, right: 30.0, top: 10.0 };
+/// assert!(giou(a, disjoint) < 0.0);
+/// ```
+pub fn giou(predicted: BBox, ground_truth: BBox) -> f32 {
+    let intersection = intersection_area(predicted, ground_truth);
+    let union = area(predicted) + area(ground_truth) - intersection;
+    let enclosing = predicted.union(&ground_truth);
+    let enclosing_area = area(enclosing);
+
+    if enclosing_area <= 0.0 {
+        return 0.0;
+    }
+
+    let iou = if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    };
+    iou - (enclosing_area - union) / enclosing_area
+}
+
+/// Region-classification F1 at a given IoU matching threshold (COCO-style), broken out
+/// per [`crate::layout::RegionClass`].
+///
+/// For each class present in `predicted` or `ground_truth`: predictions are sorted by
+/// confidence (highest first) and greedily matched to the highest-IoU unmatched
+/// ground-truth region of the same class with `IoU >= iou_threshold`. Unmatched
+/// predictions count as false positives, unmatched ground-truth regions as false
+/// negatives; `F1 = 2*TP / (2*TP + FP + FN)`.
+///
+/// Classes with no predictions and no ground truth are omitted from the result.
+pub fn region_f1(
+    predicted: &[crate::layout::Region],
+    ground_truth: &[crate::layout::Region],
+    iou_threshold: f32,
+) -> HashMap<crate::layout::RegionClass, f32> {
+    use crate::layout::RegionClass;
+
+    let mut classes: Vec<RegionClass> = predicted
+        .iter()
+        .map(|r| r.class)
+        .chain(ground_truth.iter().map(|r| r.class))
+        .collect();
+    classes.sort_by_key(|c| *c as u8 as u32 + region_class_rank(*c));
+    classes.dedup();
+
+    let mut scores = HashMap::new();
+
+    for class in classes {
+        let mut preds: Vec<&crate::layout::Region> =
+            predicted.iter().filter(|r| r.class == class).collect();
+        preds.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+
+        let gts: Vec<&crate::layout::Region> =
+            ground_truth.iter().filter(|r| r.class == class).collect();
+        let mut matched = vec![false; gts.len()];
+
+        let mut true_positives = 0usize;
+        for pred in &preds {
+            let mut best: Option<(usize, f32)> = None;
+            for (i, gt) in gts.iter().enumerate() {
+                if matched[i] {
+                    continue;
+                }
+                let score = iou(pred.bbox, gt.bbox);
+                if score >= iou_threshold && best.is_none_or(|(_, b)| score > b) {
+                    best = Some((i, score));
+                }
+            }
+            if let Some((i, _)) = best {
+                matched[i] = true;
+                true_positives += 1;
+            }
+        }
+
+        let false_positives = preds.len() - true_positives;
+        let false_negatives = gts.len() - true_positives;
+        let denom = 2 * true_positives + false_positives + false_negatives;
+
+        if denom > 0 {
+            scores.insert(class, (2 * true_positives) as f32 / denom as f32);
+        }
+    }
+
+    scores
+}
+
+/// Stable ordering key for [`crate::layout::RegionClass`] used only to make
+/// [`region_f1`]'s internal class enumeration deterministic; not a meaningful ranking.
+fn region_class_rank(class: crate::layout::RegionClass) -> u32 {
+    use crate::layout::RegionClass::*;
+    match class {
+        Caption => 0,
+        Footnote => 1,
+        Formula => 2,
+        ListItem => 3,
+        PageFooter => 4,
+        PageHeader => 5,
+        Picture => 6,
+        SectionHeader => 7,
+        Table => 8,
+        Text => 9,
+        Title => 10,
+    }
+}
+
 /// Tree-Edit-Distance-based Similarity, structure only (row/column/span topology,
 /// ignoring cell text), as defined by PubTabNet.
 ///
-/// # Panics
-///
-/// Always panics — this is a Stage 2 stub, not yet implemented.
-pub fn teds_struct(_predicted_html: &str, _ground_truth_html: &str) -> f64 {
-    unimplemented!("TEDS-Struct is not yet implemented")
+/// `predicted_html` and `ground_truth_html` are parsed as the restricted table-HTML
+/// dialect documented on the [`teds`] submodule. Returns a score in `[0.0, 1.0]`, where
+/// `1.0` means identical row/column/span topology.
+pub fn teds_struct(predicted_html: &str, ground_truth_html: &str) -> f64 {
+    teds::score(
+        predicted_html,
+        ground_truth_html,
+        teds::CostMode::StructureOnly,
+    )
 }
 
 /// Tree-Edit-Distance-based Similarity, structure and content combined.
 ///
-/// # Panics
-///
-/// Always panics — this is a Stage 2 stub, not yet implemented.
-pub fn teds(_predicted_html: &str, _ground_truth_html: &str) -> f64 {
-    unimplemented!("TEDS is not yet implemented")
+/// Like [`teds_struct`], but matching cells are further scored by normalized string edit
+/// distance between their text content.
+pub fn teds(predicted_html: &str, ground_truth_html: &str) -> f64 {
+    teds::score(predicted_html, ground_truth_html, teds::CostMode::WithText)
 }
 
 /// TEDS(IOU): a text-independent TEDS variant that scores cell content by bounding-box
 /// IoU instead of string edit distance, appropriate for an OCR-free, bbox-driven
 /// pipeline like this one.
 ///
-/// # Panics
-///
-/// Always panics — this is a Stage 2 stub, not yet implemented.
-pub fn teds_iou(_predicted_html: &str, _ground_truth_html: &str) -> f64 {
-    unimplemented!("TEDS(IOU) is not yet implemented")
+/// Cells are expected to carry a `bbox="left bottom right top"` attribute (see the
+/// [`teds`] submodule); cells missing it score maximal substitution cost against any
+/// counterpart.
+pub fn teds_iou(predicted_html: &str, ground_truth_html: &str) -> f64 {
+    teds::score(predicted_html, ground_truth_html, teds::CostMode::Iou)
 }
 
-/// Generalized IoU between a predicted and ground-truth bounding box.
+/// TEDS scoring machinery: a minimal restricted-HTML table parser and a Zhang–Shasha
+/// tree-edit-distance implementation, shared by [`super::teds_struct`], [`super::teds`],
+/// and [`super::teds_iou`].
 ///
-/// Unlike plain IoU, GIoU stays informative for non-overlapping boxes via a penalty term
-/// based on the smallest enclosing box — important for early-epoch layout models that
-/// may predict boxes with no overlap at all.
+/// ## Supported HTML dialect
 ///
-/// # Panics
-///
-/// Always panics — this is a Stage 2 stub, not yet implemented.
-pub fn giou(_predicted: BBox, _ground_truth: BBox) -> f32 {
-    unimplemented!("GIoU is not yet implemented")
+/// Only `<table>`, `<thead>`, `<tbody>`, `<tr>`, `<td>`, and `<th>` tags are recognized;
+/// any other markup is treated as an error by the caller (all three public functions
+/// require well-formed input from this dialect — this is a scoring utility for
+/// controlled evaluation harnesses, not a general HTML parser). Supported attributes:
+/// `colspan`, `rowspan` (integers, default `1`), and `bbox="left bottom right top"`
+/// (four whitespace-separated floats, used only by [`super::teds_iou`]). Cell text
+/// content is everything between a cell's open and close tag, whitespace-trimmed.
+mod teds {
+    use crate::BBox;
+
+    /// Which substitution-cost policy [`score`] uses when comparing two matched cell
+    /// nodes; see the parent module docs for what each variant means.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum CostMode {
+        StructureOnly,
+        WithText,
+        Iou,
+    }
+
+    /// A parsed table-tree node.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) struct Node {
+        pub tag: String,
+        pub colspan: u32,
+        pub rowspan: u32,
+        pub text: String,
+        pub bbox: Option<BBox>,
+        pub children: Vec<Node>,
+    }
+
+    /// Computes the TEDS-family score for `predicted_html` vs. `ground_truth_html` under
+    /// `mode`.
+    pub(super) fn score(predicted_html: &str, ground_truth_html: &str, mode: CostMode) -> f64 {
+        let predicted = parse_table(predicted_html);
+        let ground_truth = parse_table(ground_truth_html);
+
+        let max_nodes = node_count(&predicted).max(node_count(&ground_truth)).max(1);
+        let distance = tree_edit_distance(&predicted, &ground_truth, mode);
+
+        (1.0 - distance / max_nodes as f64).clamp(0.0, 1.0)
+    }
+
+    fn node_count(node: &Node) -> usize {
+        1 + node.children.iter().map(node_count).sum::<usize>()
+    }
+
+    // --- Minimal restricted-HTML table parser -----------------------------------
+
+    fn parse_table(html: &str) -> Node {
+        let mut stack: Vec<Node> = Vec::new();
+        let mut root: Option<Node> = None;
+        let mut cursor = 0usize;
+
+        while cursor < html.len() {
+            let Some(lt) = html[cursor..].find('<').map(|o| cursor + o) else {
+                // Trailing text with no more tags: attribute it to whatever is open.
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&html[cursor..]);
+                }
+                break;
+            };
+
+            // Text between the previous tag and this one belongs to the innermost
+            // currently-open node.
+            if lt > cursor {
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&html[cursor..lt]);
+                }
+            }
+
+            let gt = html[lt..].find('>').map(|o| lt + o).unwrap_or(html.len());
+            let tag_src = &html[lt + 1..gt];
+
+            if let Some(name) = tag_src.strip_prefix('/') {
+                let name = name.trim();
+                if let Some(mut finished) = stack.pop() {
+                    debug_assert_eq!(finished.tag, name, "mismatched closing tag");
+                    finished.text = finished.text.trim().to_string();
+                    match stack.last_mut() {
+                        Some(parent) => parent.children.push(finished),
+                        None => root = Some(finished),
+                    }
+                }
+            } else {
+                let mut parts = tag_src.split_whitespace();
+                let name = parts.next().unwrap_or("").to_string();
+                let mut colspan = 1;
+                let mut rowspan = 1;
+                let mut bbox = None;
+
+                for attr in parts {
+                    if let Some((key, val)) = attr.split_once('=') {
+                        let val = val.trim_matches('"');
+                        match key {
+                            "colspan" => colspan = val.parse().unwrap_or(1),
+                            "rowspan" => rowspan = val.parse().unwrap_or(1),
+                            "bbox" => bbox = parse_bbox(val),
+                            _ => {}
+                        }
+                    }
+                }
+
+                stack.push(Node {
+                    tag: name,
+                    colspan,
+                    rowspan,
+                    text: String::new(),
+                    bbox,
+                    children: Vec::new(),
+                });
+            }
+
+            cursor = gt + 1;
+        }
+
+        root.unwrap_or(Node {
+            tag: "table".to_string(),
+            colspan: 1,
+            rowspan: 1,
+            text: String::new(),
+            bbox: None,
+            children: Vec::new(),
+        })
+    }
+
+    fn parse_bbox(val: &str) -> Option<BBox> {
+        let mut nums = val.split_whitespace().filter_map(|n| n.parse::<f32>().ok());
+        Some(BBox {
+            left: nums.next()?,
+            bottom: nums.next()?,
+            right: nums.next()?,
+            top: nums.next()?,
+        })
+    }
+
+    // --- Tree edit distance (Zhang-Shasha) ---------------------------------------
+
+    /// Flattens a tree into postorder, alongside each node's "leftmost leaf descendant"
+    /// index (`l(i)` in Zhang-Shasha notation) needed for the keyroot recursion.
+    fn postorder(node: &Node) -> (Vec<&Node>, Vec<usize>) {
+        let mut nodes = Vec::new();
+        let mut leftmost = Vec::new();
+        postorder_visit(node, &mut nodes, &mut leftmost);
+        (nodes, leftmost)
+    }
+
+    fn postorder_visit<'a>(node: &'a Node, nodes: &mut Vec<&'a Node>, leftmost: &mut Vec<usize>) {
+        let mut first_child_leftmost = None;
+        for child in &node.children {
+            if first_child_leftmost.is_none() {
+                first_child_leftmost = Some(nodes.len());
+            }
+            postorder_visit(child, nodes, leftmost);
+        }
+        let this_index = nodes.len();
+        let this_leftmost = if node.children.is_empty() {
+            this_index
+        } else {
+            leftmost[first_child_leftmost.unwrap()]
+        };
+        nodes.push(node);
+        leftmost.push(this_leftmost);
+    }
+
+    fn keyroots(leftmost: &[usize]) -> Vec<usize> {
+        let mut seen = vec![false; leftmost.len()];
+        let mut roots = Vec::new();
+        for i in (0..leftmost.len()).rev() {
+            if !seen[leftmost[i]] {
+                roots.push(i);
+                seen[leftmost[i]] = true;
+            }
+        }
+        roots.sort_unstable();
+        roots
+    }
+
+    fn substitution_cost(a: &Node, b: &Node, mode: CostMode) -> f64 {
+        if a.tag != b.tag || a.colspan != b.colspan || a.rowspan != b.rowspan {
+            return 1.0;
+        }
+        match mode {
+            CostMode::StructureOnly => 0.0,
+            CostMode::WithText => normalized_edit_distance(&a.text, &b.text),
+            CostMode::Iou => match (a.bbox, b.bbox) {
+                (Some(x), Some(y)) => 1.0 - super::iou(x, y) as f64,
+                _ => 1.0,
+            },
+        }
+    }
+
+    /// Classic Levenshtein distance, normalized by the longer string's length; `0.0` for
+    /// two empty strings.
+    fn normalized_edit_distance(a: &str, b: &str) -> f64 {
+        let a: Vec<char> = a.chars().collect();
+        let b: Vec<char> = b.chars().collect();
+        if a.is_empty() && b.is_empty() {
+            return 0.0;
+        }
+
+        let mut dp = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for (i, row) in dp.iter_mut().enumerate() {
+            row[0] = i;
+        }
+        for (j, cell) in dp[0].iter_mut().enumerate() {
+            *cell = j;
+        }
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                dp[i][j] = if a[i - 1] == b[j - 1] {
+                    dp[i - 1][j - 1]
+                } else {
+                    1 + dp[i - 1][j - 1].min(dp[i - 1][j]).min(dp[i][j - 1])
+                };
+            }
+        }
+
+        dp[a.len()][b.len()] as f64 / a.len().max(b.len()) as f64
+    }
+
+    /// Zhang-Shasha tree edit distance between two ordered, labeled trees, with
+    /// insertion/deletion cost `1.0` and substitution cost per `mode` (via
+    /// [`substitution_cost`]).
+    fn tree_edit_distance(root_a: &Node, root_b: &Node, mode: CostMode) -> f64 {
+        let (nodes_a, leftmost_a) = postorder(root_a);
+        let (nodes_b, leftmost_b) = postorder(root_b);
+        let n = nodes_a.len();
+        let m = nodes_b.len();
+
+        // `treedist[i][j]` (1-indexed) once computed by the keyroot loop below.
+        let mut treedist = vec![vec![0.0f64; m + 1]; n + 1];
+
+        for &i in &keyroots(&leftmost_a) {
+            for &j in &keyroots(&leftmost_b) {
+                let li = leftmost_a[i];
+                let lj = leftmost_b[j];
+                let width = i - li + 2;
+                let height = j - lj + 2;
+                let mut forest_dist = vec![vec![0.0f64; height]; width];
+
+                for di in 1..width {
+                    forest_dist[di][0] = forest_dist[di - 1][0] + 1.0;
+                }
+                for dj in 1..height {
+                    forest_dist[0][dj] = forest_dist[0][dj - 1] + 1.0;
+                }
+
+                for di in 1..width {
+                    for dj in 1..height {
+                        let node_i = li + di - 1;
+                        let node_j = lj + dj - 1;
+
+                        if leftmost_a[node_i] == li && leftmost_b[node_j] == lj {
+                            let sub = substitution_cost(nodes_a[node_i], nodes_b[node_j], mode);
+                            let cost = (forest_dist[di - 1][dj] + 1.0)
+                                .min(forest_dist[di][dj - 1] + 1.0)
+                                .min(forest_dist[di - 1][dj - 1] + sub);
+                            forest_dist[di][dj] = cost;
+                            treedist[node_i + 1][node_j + 1] = cost;
+                        } else {
+                            let ii = leftmost_a[node_i] - li;
+                            let jj = leftmost_b[node_j] - lj;
+                            let cost = (forest_dist[di - 1][dj] + 1.0)
+                                .min(forest_dist[di][dj - 1] + 1.0)
+                                .min(forest_dist[ii][jj] + treedist[node_i + 1][node_j + 1]);
+                            forest_dist[di][dj] = cost;
+                        }
+                    }
+                }
+            }
+        }
+
+        treedist[n][m]
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_simple_table() {
+            let node = parse_table("<table><tr><td>a</td><td>b</td></tr></table>");
+            assert_eq!(node.tag, "table");
+            assert_eq!(node.children.len(), 1);
+            assert_eq!(node.children[0].children.len(), 2);
+            assert_eq!(node.children[0].children[0].text, "a");
+        }
+
+        #[test]
+        fn identical_tables_score_one() {
+            let html = "<table><tr><td>a</td><td>b</td></tr></table>";
+            assert_eq!(score(html, html, CostMode::StructureOnly), 1.0);
+            assert_eq!(score(html, html, CostMode::WithText), 1.0);
+        }
+
+        #[test]
+        fn rowspan_mismatch_lowers_structure_score() {
+            let a = "<table><tr><td>a</td><td>b</td></tr></table>";
+            let b = "<table><tr><td rowspan=\"2\">a</td><td>b</td></tr></table>";
+            assert!(score(a, b, CostMode::StructureOnly) < 1.0);
+        }
+
+        #[test]
+        fn text_mismatch_only_affects_teds_not_teds_struct() {
+            let a = "<table><tr><td>a</td></tr></table>";
+            let b = "<table><tr><td>z</td></tr></table>";
+            assert_eq!(score(a, b, CostMode::StructureOnly), 1.0);
+            assert!(score(a, b, CostMode::WithText) < 1.0);
+        }
+    }
 }
 
-/// Region-classification F1 at a given IoU/GIoU matching threshold (COCO-style),
-/// broken out per [`crate::layout::RegionClass`].
-///
-/// # Panics
-///
-/// Always panics — this is a Stage 2 stub, not yet implemented.
-pub fn region_f1(
-    _predicted: &[crate::layout::Region],
-    _ground_truth: &[crate::layout::Region],
-    _iou_threshold: f32,
-) -> HashMap<crate::layout::RegionClass, f32> {
-    unimplemented!("Region F1 is not yet implemented")
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{Region, RegionClass};
+
+    fn bbox(left: f32, bottom: f32, right: f32, top: f32) -> BBox {
+        BBox {
+            left,
+            bottom,
+            right,
+            top,
+        }
+    }
+
+    #[test]
+    fn giou_identical_boxes_is_one() {
+        let a = bbox(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(giou(a, a), 1.0);
+    }
+
+    #[test]
+    fn giou_disjoint_boxes_is_negative() {
+        let a = bbox(0.0, 0.0, 10.0, 10.0);
+        let b = bbox(20.0, 0.0, 30.0, 10.0);
+        assert!(giou(a, b) < 0.0);
+    }
+
+    #[test]
+    fn region_f1_perfect_match_is_one() {
+        let region = |bbox| Region {
+            class: RegionClass::Text,
+            bbox,
+            confidence: 1.0,
+        };
+        let predicted = vec![region(bbox(0.0, 0.0, 10.0, 10.0))];
+        let ground_truth = vec![region(bbox(0.0, 0.0, 10.0, 10.0))];
+
+        let scores = region_f1(&predicted, &ground_truth, 0.5);
+        assert_eq!(scores[&RegionClass::Text], 1.0);
+    }
+
+    #[test]
+    fn region_f1_with_miss_and_false_positive() {
+        let region = |bbox| Region {
+            class: RegionClass::Title,
+            bbox,
+            confidence: 1.0,
+        };
+        // One predicted region matches, one is a false positive; ground truth has one
+        // extra miss.
+        let predicted = vec![
+            region(bbox(0.0, 0.0, 10.0, 10.0)),
+            region(bbox(100.0, 100.0, 110.0, 110.0)),
+        ];
+        let ground_truth = vec![
+            region(bbox(0.0, 0.0, 10.0, 10.0)),
+            region(bbox(50.0, 50.0, 60.0, 60.0)),
+        ];
+
+        let scores = region_f1(&predicted, &ground_truth, 0.5);
+        // TP=1, FP=1, FN=1 -> F1 = 2/(2+1+1) = 0.5
+        assert_eq!(scores[&RegionClass::Title], 0.5);
+    }
 }

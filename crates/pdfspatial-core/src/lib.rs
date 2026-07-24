@@ -4,18 +4,27 @@
 //! pipeline that turns PDFs into Markdown by grounding every extracted token in its
 //! on-page bounding box. The stages are:
 //!
-//! 1. **Baseline extraction** (implemented here) — a deterministic, OCR-free text
-//!    extraction floor built directly on PDFium's native text layer. See [`extract`].
-//! 2. **Validation** — structural-fidelity scoring (TEDS, GIoU, region F1) against
-//!    held-out layout ground truth. See [`metrics`] (signatures only, not yet implemented).
+//! 1. **Baseline extraction** (implemented) — a deterministic, OCR-free text extraction
+//!    floor built directly on PDFium's native text layer. See [`extract`].
+//! 2. **Validation** (metrics implemented; no dataset harness) — structural-fidelity
+//!    scoring: [`metrics::giou`], [`metrics::region_f1`], and the TEDS family
+//!    ([`metrics::teds_struct`], [`metrics::teds`], [`metrics::teds_iou`]) are pure,
+//!    tested functions. Wiring them up against held-out layout ground truth (e.g.
+//!    DocLayNet) is separate future work.
 //! 3. **Error analysis** — clustering Stage 2 shortfalls into a reproducible failure-mode
 //!    taxonomy. See [`assemble`] for the pitfall checklist this stage is organized around.
-//! 4. **Refinement** — closing the gaps found in Stage 3 with heuristics first, targeted
+//! 4. **Refinement** — closing the gaps found in Stage 3, heuristics first
+//!    ([`layout::classify_regions`] for region classification,
+//!    [`assemble::assemble_reading_order`] for column-aware reading order), targeted
 //!    model fine-tuning second.
 //!
-//! Only Stage 1 is implemented today. Stages 2-4 are represented as documented function
-//! signatures and module structure so the crate's shape tracks the roadmap, but their
-//! bodies are intentionally `unimplemented!()`.
+//! Stage 1 is fully implemented, and Stage 2/4's *algorithmic* core — validation
+//! metrics, a heuristic layout classifier, XY-cut reading-order assembly, and structural
+//! Markdown output ([`serialize::to_markdown_structured`]) — is implemented as pure,
+//! dependency-free Rust. The one piece still unimplemented is the vision-model layout
+//! detector the roadmap describes for Stage 2/4b (an ONNX RT-DETR-style detector over
+//! rendered page rasters); see [`layout`] for why that's a fundamentally different kind
+//! of work than the rest of this crate.
 //!
 //! # Quick start
 //!
@@ -42,6 +51,8 @@ pub mod metrics;
 pub mod serialize;
 
 pub use extract::{PdfiumSource, extract_baseline, extract_baseline_with_source};
+pub use metrics::iou;
+pub use serialize::to_markdown_structured;
 
 /// Errors that can occur anywhere in the `pdfspatial` pipeline.
 #[derive(Debug, thiserror::Error)]
