@@ -1,0 +1,19 @@
+{
+  "id": "footnote-marker-not-classified",
+  "pitfall": "footnote",
+  "root_cause": "classification",
+  "description": "A footnote block referenced by a superscript-style marker in the body text. classify_regions has no Footnote heuristic at all -- it never emits RegionClass::Footnote -- so this block falls through every other rule to the default RegionClass::Text.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "This references a footnote marker superscript.", "bbox": [40.0, 300.0, 400.0, 320.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "1 This is a footnote clarifying the claim above.", "bbox": [40.0, 90.0, 400.0, 105.0], "font_size": 8.0 } ] }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "1 This is a footnote clarifying the claim above.", "class": "footnote" }
+    ]
+  }
+}

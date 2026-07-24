@@ -1,0 +1,24 @@
+{
+  "id": "merged_table_cell-rowspan-cell-repeated-label",
+  "pitfall": "merged_table_cell",
+  "root_cause": "classification",
+  "description": "A table whose first column uses a rowspan (the 'West' region label applies to both rows below it, so the second row's first cell is blank). Same root cause as the colspan case: RegionClass::Table is unreachable without a vision-model detector.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      {
+        "lines": [
+          { "text": "Region      Category   Amount", "bbox": [40.0, 500.0, 400.0, 515.0], "font_size": 10.0 },
+          { "text": "West        A          100", "bbox": [40.0, 485.0, 400.0, 500.0], "font_size": 10.0 },
+          { "text": "            B          200", "bbox": [40.0, 470.0, 400.0, 485.0], "font_size": 10.0 }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "Region      Category   Amount\nWest        A          100\n            B          200", "class": "table" }
+    ]
+  }
+}

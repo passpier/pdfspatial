@@ -63,6 +63,68 @@ pub enum RootCause {
     Ordering,
 }
 
+/// A category from the [module-level pitfall checklist](self), one variant per checklist
+/// item, in the checklist's listed order.
+///
+/// This is the taxonomy the Stage 3 regression corpus (`fixtures/`, loaded by
+/// `eval::corpus` behind the `stage3` cargo feature) organizes its cases around: every
+/// regression case is tagged with exactly one `Pitfall` plus a [`RootCause`].
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::assemble::Pitfall;
+///
+/// let pitfall = Pitfall::MultiColumn;
+/// assert_eq!(pitfall, Pitfall::MultiColumn);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Pitfall {
+    /// Text lines merged across column boundaries, or column order inverted (right
+    /// column read before left).
+    MultiColumn,
+    /// Footnote text merged into body `Text` instead of classified as `Footnote`;
+    /// footnote markers (superscript numerals) not linked to their note.
+    Footnote,
+    /// Header/footer text leaking into the body text stream; running headers
+    /// misclassified as `Section-header`.
+    HeaderFooter,
+    /// Table cells spanning multiple visual lines merged incorrectly with adjacent
+    /// rows; rowspan/colspan not detected.
+    MultiLineTableCell,
+    /// Merged table cells (rowspan/colspan) whose tree-topology mismatch TEDS-Struct
+    /// penalizes most heavily.
+    MergedTableCell,
+    /// Borderless / whitespace-delimited tables with no ruling lines for the layout
+    /// model to key off; frequently misclassified as plain `Text`.
+    BorderlessTable,
+    /// Inline formulas embedded mid-sentence not separated from surrounding text;
+    /// multi-line/stacked formulas fragmented into multiple bounding boxes.
+    NestedFormula,
+    /// Footnote markers, exponents, and chemical/math subscripts causing
+    /// baseline-clustering errors in Stage 1's line grouping.
+    SuperSubscript,
+    /// Sidebar labels, rotated table headers, CJK vertical text.
+    RotatedText,
+    /// Captions not correctly linked to their parent `Picture`/`Table` region, or
+    /// associated with the wrong figure when multiple figures share a page.
+    FigureCaption,
+    /// Multi-level bullet/numbered lists collapsed into flat `List-item` blocks,
+    /// losing hierarchy.
+    ListNesting,
+    /// Tables or paragraphs split across a page boundary not stitched back together.
+    CrossPageContinuation,
+    /// `Section-header` misclassified as `Title` or emphasized `Text` when
+    /// font-weight is the only visual cue.
+    SectionHeaderVsBold,
+    /// Embedded/CID-keyed fonts and ligatures causing pdfium character extraction to
+    /// drop or garble glyphs from non-standard font encodings.
+    EmbeddedFont,
+    /// Watermarks, stamps, or redaction boxes overlapping real text and corrupting
+    /// bbox clustering.
+    OverlappingText,
+}
+
 /// A vertical (column-gutter) or horizontal (row) whitespace gap smaller than this,
 /// expressed as a multiple of the page width/height, is not considered a qualifying
 /// XY-cut -- it's normal inter-paragraph spacing, not a structural column/row boundary.

@@ -1,0 +1,24 @@
+{
+  "id": "borderless_table-whitespace-metrics-table-misclassified",
+  "pitfall": "borderless_table",
+  "root_cause": "classification",
+  "description": "A second whitespace-delimited table variant (a metrics summary), demonstrating the same gap independent of specific column content: no ruling lines means no signal for classify_regions to key a Table class off of.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      {
+        "lines": [
+          { "text": "Metric      Value    Unit", "bbox": [40.0, 500.0, 400.0, 515.0], "font_size": 10.0 },
+          { "text": "Revenue     120000   USD", "bbox": [40.0, 485.0, 400.0, 500.0], "font_size": 10.0 },
+          { "text": "Growth      12       pct", "bbox": [40.0, 470.0, 400.0, 485.0], "font_size": 10.0 }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "Metric      Value    Unit\nRevenue     120000   USD\nGrowth      12       pct", "class": "table" }
+    ]
+  }
+}

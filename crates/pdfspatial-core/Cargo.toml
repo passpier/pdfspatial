@@ -39,6 +39,7 @@ harness = false
 
 [features]
 doclaynet = ["dep:serde", "dep:serde_json"]
+stage3 = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
 pdfium-render = "0.9"

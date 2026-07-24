@@ -1,0 +1,20 @@
+{
+  "id": "figure_caption-picture-placeholder-not-classified",
+  "pitfall": "figure_caption",
+  "root_cause": "classification",
+  "description": "A figure region (here a text stand-in for an image, since this corpus can't encode real raster content) followed by its caption. The caption's own heuristic (is_caption) already recognizes the 'Figure N' prefix correctly, but the figure region itself has no heuristic at all -- RegionClass::Picture requires the still-unimplemented vision detector -- so it defaults to RegionClass::Text instead of being linked to its caption as a Picture.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "Bar chart depicting quarterly revenue by region.", "bbox": [40.0, 600.0, 560.0, 700.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Figure 1: Quarterly revenue by region.", "bbox": [40.0, 580.0, 560.0, 595.0], "font_size": 9.0 } ] }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "Bar chart depicting quarterly revenue by region.", "class": "picture" },
+      { "block_text": "Figure 1: Quarterly revenue by region.", "class": "caption" }
+    ]
+  }
+}

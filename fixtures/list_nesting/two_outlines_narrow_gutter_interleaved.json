@@ -1,0 +1,28 @@
+{
+  "id": "list_nesting-two-outlines-narrow-gutter-interleaved",
+  "pitfall": "list_nesting",
+  "root_cause": "ordering",
+  "description": "Two side-by-side nested outlines (a header item plus two sub-items each), separated by a 10pt gutter -- below assemble.rs's 18pt MIN_CUT_FRACTION threshold for a 600pt-wide page. With no qualifying cut, the naive top-to-bottom/left-to-right fallback interleaves the two outlines row by row, so the second outline's header is read before the first outline's own sub-items -- collapsing each list's internal hierarchy into a single flat, incorrectly ordered sequence.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "A. Setup Steps", "bbox": [40.0, 700.0, 290.0, 715.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "1. Install dependencies", "bbox": [40.0, 680.0, 290.0, 695.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "2. Configure environment", "bbox": [40.0, 660.0, 290.0, 675.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "B. Run Steps", "bbox": [300.0, 700.0, 550.0, 715.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "1. Start server", "bbox": [300.0, 680.0, 550.0, 695.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "2. Verify output", "bbox": [300.0, 660.0, 550.0, 675.0], "font_size": 10.0 } ] }
+    ]
+  },
+  "expected": {
+    "reading_order": [
+      "A. Setup Steps",
+      "1. Install dependencies",
+      "2. Configure environment",
+      "B. Run Steps",
+      "1. Start server",
+      "2. Verify output"
+    ]
+  }
+}

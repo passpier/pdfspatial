@@ -1,0 +1,19 @@
+{
+  "id": "multi_column-narrow-gutter-row-interleaved",
+  "pitfall": "multi_column",
+  "root_cause": "ordering",
+  "description": "Two columns separated by a 10pt gutter, below assemble.rs's MIN_CUT_FRACTION (3% of a 600pt-wide page = 18pt). The vertical cut never qualifies, so xy_cut_order falls back to naive top-to-bottom/left-to-right sorting, which interleaves the two columns row by row instead of reading the left column fully before the right.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "Left row one", "bbox": [40.0, 700.0, 290.0, 750.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Left row two", "bbox": [40.0, 650.0, 290.0, 700.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Right row one", "bbox": [300.0, 700.0, 550.0, 750.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Right row two", "bbox": [300.0, 650.0, 550.0, 700.0], "font_size": 10.0 } ] }
+    ]
+  },
+  "expected": {
+    "reading_order": ["Left row one", "Left row two", "Right row one", "Right row two"]
+  }
+}

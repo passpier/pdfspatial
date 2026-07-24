@@ -1,0 +1,24 @@
+{
+  "id": "figure_caption-multiple-figures-share-a-page",
+  "pitfall": "figure_caption",
+  "root_cause": "classification",
+  "description": "Two figures side by side, each with its own caption directly beneath it -- the scenario the checklist calls out as most at risk of a caption being associated with the wrong figure. This pipeline has no association step at all yet (Picture is never emitted, and nothing links a Caption to a specific Picture region), so this case seeds the minimal geometry for that future check; today it only exercises the same missing-Picture-class gap as the single-figure case.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "Diagram of process pipeline stage one.", "bbox": [40.0, 650.0, 290.0, 700.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Diagram of process pipeline stage two.", "bbox": [300.0, 650.0, 550.0, 700.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Figure 1: Pipeline stage one diagram.", "bbox": [40.0, 630.0, 290.0, 645.0], "font_size": 9.0 } ] },
+      { "lines": [ { "text": "Figure 2: Pipeline stage two diagram.", "bbox": [300.0, 630.0, 550.0, 645.0], "font_size": 9.0 } ] }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "Diagram of process pipeline stage one.", "class": "picture" },
+      { "block_text": "Diagram of process pipeline stage two.", "class": "picture" },
+      { "block_text": "Figure 1: Pipeline stage one diagram.", "class": "caption" },
+      { "block_text": "Figure 2: Pipeline stage two diagram.", "class": "caption" }
+    ]
+  }
+}

@@ -2,7 +2,7 @@
 //! [`crate::metrics`] across a page-level dataset into a single [`Stage2Report`]
 //! dashboard.
 //!
-//! This module is intentionally split in two:
+//! This module is intentionally split in parts:
 //!
 //! - This file (`eval`) is the pure aggregation core: [`evaluate_pages`] takes
 //!   already-built `(predicted, ground_truth)` region pairs and produces a
@@ -13,9 +13,16 @@
 //!   [DocLayNet](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1) sample
 //!   from disk and turns it into the `(predicted, ground_truth)` pairs this module
 //!   consumes.
+//! - [`corpus`] (behind the `stage3` cargo feature) loads the Stage 3 regression
+//!   corpus — hand-authored, minimal-repro cases tagged by failure-mode taxonomy — and
+//!   checks the pipeline's actual behavior against each case's desired post-fix
+//!   behavior.
 
 #[cfg(feature = "doclaynet")]
 pub mod doclaynet;
+
+#[cfg(feature = "stage3")]
+pub mod corpus;
 
 use crate::layout::{Region, RegionClass};
 use crate::metrics;

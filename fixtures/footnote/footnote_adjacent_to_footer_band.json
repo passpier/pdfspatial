@@ -1,0 +1,19 @@
+{
+  "id": "footnote-adjacent-to-footer-band",
+  "pitfall": "footnote",
+  "root_cause": "classification",
+  "description": "A footnote sitting just above the page-footer band (bottom=70pt, above the 64pt/8%-of-800 threshold), so it isn't even eligible for the (also-wrong) PageFooter heuristic -- it simply falls to Text, same as ordinary body copy.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "Body text referencing note two.", "bbox": [40.0, 200.0, 400.0, 220.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "2 Another footnote near the bottom margin explaining a term.", "bbox": [40.0, 70.0, 400.0, 85.0], "font_size": 8.0 } ] }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "2 Another footnote near the bottom margin explaining a term.", "class": "footnote" }
+    ]
+  }
+}

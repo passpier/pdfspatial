@@ -1,0 +1,24 @@
+{
+  "id": "borderless_table-whitespace-table-misclassified-as-text",
+  "pitfall": "borderless_table",
+  "root_cause": "classification",
+  "description": "A whitespace-delimited table (no ruling lines) rendered as ordinary aligned lines. classify_regions has no table-structure signal at all -- RegionClass::Table can only come from the still-unimplemented vision detector -- so this block falls through every heuristic to the default RegionClass::Text.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      {
+        "lines": [
+          { "text": "Name        Score", "bbox": [40.0, 500.0, 400.0, 515.0], "font_size": 10.0 },
+          { "text": "Alice          92", "bbox": [40.0, 485.0, 400.0, 500.0], "font_size": 10.0 },
+          { "text": "Bob            77", "bbox": [40.0, 470.0, 400.0, 485.0], "font_size": 10.0 }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "Name        Score\nAlice          92\nBob            77", "class": "table" }
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "nested_formula-stacked-fraction-fragmented-lines",
+  "pitfall": "nested_formula",
+  "root_cause": "classification",
+  "description": "A multi-line stacked formula (a fraction, numerator over denominator) authored as two separate lines within one block. Beyond the missing Formula heuristic, this also documents the fragmentation risk the checklist calls out for stacked formulas -- here the two lines are kept in one Block, but a real extraction pipeline could easily split them into separate Blocks entirely.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      {
+        "lines": [
+          { "text": "x + y", "bbox": [260.0, 560.0, 340.0, 575.0], "font_size": 12.0 },
+          { "text": "x - y", "bbox": [260.0, 540.0, 340.0, 555.0], "font_size": 12.0 }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "x + y\nx - y", "class": "formula" }
+    ]
+  }
+}

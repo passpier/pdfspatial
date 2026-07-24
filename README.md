@@ -6,14 +6,15 @@ A closed-loop, four-stage pipeline for turning PDFs into Markdown, grounded in s
 Google's PDFium engine.
 
 This repository currently ships one crate, [`pdfspatial-core`](crates/pdfspatial-core),
-implementing **Stage 1** in full and the **algorithmic core of Stages 2 and 4**:
-validation metrics, a deterministic heuristic layout classifier, column-aware
-reading-order assembly, and structural Markdown output — all pure, dependency-free Rust.
-The one piece still unimplemented is the vision-model layout detector the roadmap
-describes for Stage 2/4b (an ONNX RT-DETR-style detector over rendered page rasters,
-needed for `Table`/`Picture`/`Formula` classes); it remains a documented
-`unimplemented!()` stub since it needs an inference runtime, model weights, and a
-DocLayNet-backed evaluation harness that are out of scope for this pass.
+implementing **Stage 1** in full, the **algorithmic core of Stages 2 and 4**
+(validation metrics, a deterministic heuristic layout classifier, column-aware
+reading-order assembly, and structural Markdown output — all pure, dependency-free
+Rust), and a **seeded Stage 3 regression corpus and harness**. The one piece still
+unimplemented is the vision-model layout detector the roadmap describes for Stage 2/4b
+(an ONNX RT-DETR-style detector over rendered page rasters, needed for
+`Table`/`Picture`/`Formula` classes); it remains a documented `unimplemented!()` stub
+since it needs an inference runtime, model weights, and a DocLayNet-backed evaluation
+harness that are out of scope for this pass.
 
 ## The four-stage loop
 
@@ -36,11 +37,18 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    table-structure predictor yet exists to feed it real predictions. See
    [`metrics.rs`](crates/pdfspatial-core/src/metrics.rs) and
    [`eval/`](crates/pdfspatial-core/src/eval).
-3. **Error analysis** (stubbed) — cluster Stage 2 shortfalls into a reproducible
-   failure-mode taxonomy (multi-column gutters, footnotes, cross-page tables, ...), each
-   tied to a minimal-repro regression fixture. See
-   [`assemble.rs`](crates/pdfspatial-core/src/assemble.rs) for the full pitfall
-   checklist this stage organizes around.
+3. **Error analysis** (seed corpus + harness implemented) — a reproducible failure-mode
+   taxonomy (multi-column gutters, footnotes, borderless tables, ...), each pitfall tied
+   to a minimal-repro regression case tagged with a root cause (`geometric`,
+   `classification`, `ordering`). See [`assemble.rs`](crates/pdfspatial-core/src/assemble.rs)
+   for the `Pitfall`/`RootCause` taxonomy, [`eval/corpus.rs`](crates/pdfspatial-core/src/eval/corpus.rs)
+   (gated behind the `stage3` feature) for the loader/checker, and
+   [`fixtures/`](fixtures) for the corpus itself — 18 seeded cases across 9 pitfalls
+   reachable through the pure-Rust classify/assemble surface, with the remaining
+   extraction-layer pitfalls documented as deferred pending real PDFium/DocLayNet
+   fixtures. Each case's expected behavior is the desired *post-Stage-4* outcome, so the
+   corpus's behavioral test is `#[ignore]`d and fails today by design — see
+   `fixtures/README.md`.
 4. **Refinement** (heuristics implemented; fine-tuning stubbed) — [`layout.rs`](crates/pdfspatial-core/src/layout.rs)
    classifies regions with deterministic text-layer heuristics (Title, SectionHeader,
    ListItem, Caption, PageHeader/Footer, Text — `Table`/`Picture`/`Formula` need the
@@ -139,7 +147,7 @@ pdfspatial/
 ├── crates/pdfspatial-core/   # the published crate: extract, layout, assemble,
 │                             # serialize, metrics
 ├── benches/                  # Criterion benches for Stage 2 validation
-├── fixtures/                 # Stage 3 minimal-repro regression corpus (placeholder)
+├── fixtures/                 # Stage 3 minimal-repro regression corpus (seeded)
 ├── examples/basic_extract.rs
 └── .github/workflows/ci.yml
 ```

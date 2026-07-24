@@ -2,3 +2,4 @@
 Cargo.lock
 *.pdb
 .DS_Store
+CLAUDE.local.md

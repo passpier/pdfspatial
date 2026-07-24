@@ -1,0 +1,25 @@
+{
+  "id": "header_footer-running-footer-exceeds-line-limit",
+  "pitfall": "header_footer",
+  "root_cause": "classification",
+  "description": "A 3-line running footer sitting in the bottom 8% footer band (bottom=20pt <= 64pt/8%-of-800). Same HEADER_FOOTER_MAX_LINES(2) cutoff as the header case: this 3-line block never gets RegionClass::PageFooter, only the default RegionClass::Text.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "Body text of the document continues here.", "bbox": [40.0, 300.0, 560.0, 400.0], "font_size": 10.0 } ] },
+      {
+        "lines": [
+          { "text": "Page 12", "bbox": [40.0, 50.0, 300.0, 60.0], "font_size": 8.0 },
+          { "text": "Section 3: Results", "bbox": [40.0, 35.0, 300.0, 50.0], "font_size": 8.0 },
+          { "text": "www.example.com/docs", "bbox": [40.0, 20.0, 300.0, 35.0], "font_size": 8.0 }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "classes": [
+      { "block_text": "Page 12\nSection 3: Results\nwww.example.com/docs", "class": "page_footer" }
+    ]
+  }
+}
