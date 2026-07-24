@@ -26,12 +26,16 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    floor built directly on PDFium's native text layer: char → word → line → block
    grouping via geometric heuristics only (no ML). See
    [`crates/pdfspatial-core/src/extract.rs`](crates/pdfspatial-core/src/extract.rs).
-2. **Validation** (metrics implemented; no dataset harness yet) — score structural
-   fidelity: TEDS, TEDS(IOU), and TEDS-Struct (via a restricted table-HTML parser and a
+2. **Validation** (metrics and dataset harness implemented) — score structural fidelity:
+   TEDS, TEDS(IOU), and TEDS-Struct (via a restricted table-HTML parser and a
    Zhang–Shasha tree-edit-distance implementation), plus GIoU and per-class region F1.
-   Not yet wired up against a held-out dataset such as
-   [DocLayNet](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1). See
-   [`metrics.rs`](crates/pdfspatial-core/src/metrics.rs).
+   Wired up against held-out [DocLayNet](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1)
+   samples via the `eval` module (`crates/pdfspatial-core/src/eval/`, gated behind the
+   `doclaynet` cargo feature) and scored into Criterion benches in
+   [`benches/`](benches). TEDS itself stays exercised only by its own unit tests, since no
+   table-structure predictor yet exists to feed it real predictions. See
+   [`metrics.rs`](crates/pdfspatial-core/src/metrics.rs) and
+   [`eval/`](crates/pdfspatial-core/src/eval).
 3. **Error analysis** (stubbed) — cluster Stage 2 shortfalls into a reproducible
    failure-mode taxonomy (multi-column gutters, footnotes, cross-page tables, ...), each
    tied to a minimal-repro regression fixture. See
@@ -109,13 +113,32 @@ constructs a synthetic multi-column `Document` in code and runs it through
 PDF and no PDFium library, so a plain `cargo test` (no environment variable required)
 exercises it.
 
+Stage 2's DocLayNet dataset harness (`crates/pdfspatial-core/tests/stage2_doclaynet.rs`)
+loads a vendored, hand-authored DocLayNet-format fixture and scores
+`layout::classify_regions`'s text-only predictions against it. It's gated behind the
+`doclaynet` cargo feature:
+
+```sh
+cargo test --features doclaynet
+```
+
+### Running benchmarks
+
+[Criterion](https://docs.rs/criterion) benches score the Stage 2 eval pipeline and metric
+primitives against the vendored DocLayNet fixture (or a real sample via `DOCLAYNET_DIR`);
+see [`benches/README.md`](benches/README.md) for details:
+
+```sh
+cargo bench --features doclaynet
+```
+
 ## Project layout
 
 ```
 pdfspatial/
 ├── crates/pdfspatial-core/   # the published crate: extract, layout, assemble,
 │                             # serialize, metrics
-├── benches/                  # Stage 2 validation benchmarks (placeholder)
+├── benches/                  # Criterion benches for Stage 2 validation
 ├── fixtures/                 # Stage 3 minimal-repro regression corpus (placeholder)
 ├── examples/basic_extract.rs
 └── .github/workflows/ci.yml
