@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PDFSPATIAL_PDFIUM_LIB: /home/runner/pdfium/lib/libpdfium.so
+
+jobs:
+  test:
+    name: test / clippy / publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Download prebuilt PDFium (bblanchon/pdfium-binaries)
+        run: |
+          mkdir -p /home/runner/pdfium
+          curl -sL "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz" \
+            -o /tmp/pdfium.tgz
+          tar -xzf /tmp/pdfium.tgz -C /home/runner/pdfium
+          ls -la /home/runner/pdfium/lib
+
+      - name: cargo test --all-features
+        run: cargo test --workspace --all-features
+
+      - name: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo publish --dry-run (sanity check only, no real publish)
+        run: cargo publish --dry-run -p pdfspatial-core

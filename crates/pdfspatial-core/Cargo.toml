@@ -1,0 +1,29 @@
+[package]
+name = "pdfspatial-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Extract spatially-grounded, reading-order text from PDFs as a deterministic, OCR-free baseline for Markdown conversion."
+documentation = "https://docs.rs/pdfspatial-core"
+readme = "../../README.md"
+keywords = ["pdf", "markdown", "pdfium", "layout", "extraction"]
+categories = ["parser-implementations", "text-processing"]
+
+[lib]
+name = "pdfspatial_core"
+path = "src/lib.rs"
+
+[[example]]
+name = "basic_extract"
+path = "../../examples/basic_extract.rs"
+
+[dependencies]
+pdfium-render = "0.9"
+thiserror = "2"
+rayon = "1"
+
+[dev-dependencies]

@@ -1,0 +1,6 @@
+Baseline Extraction Test Document
+This is the first line of the opening paragraph.
+It continues here on a second closely spaced line.
+And wraps up on this third and final line of the block.
+A new paragraph starts after a larger vertical gap.
+It also spans two lines before the page ends.
