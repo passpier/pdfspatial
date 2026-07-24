@@ -4,13 +4,16 @@
 //! crate, matching the roadmap's Stage 1 metric table exactly (character extraction
 //! recall ≥ 99%, line-grouping accuracy ≥ 95% on single-column documents).
 //!
-//! [`iou`], [`giou`], and [`region_f1`] implement the roadmap's Stage 2 region-level
-//! metrics (mean GIoU, per-class F1 at a COCO-style IoU threshold). The TEDS family
-//! ([`teds_struct`], [`teds`], [`teds_iou`]) implements the roadmap's table-structure
-//! metrics on a restricted table-HTML dialect, backed by a private Zhang–Shasha
-//! tree-edit-distance implementation (see the `teds` submodule). None of these are wired
-//! to a real DocLayNet/PubTabNet harness yet — that dataset-loading work is separate from
-//! the pure scoring functions implemented here.
+//! [`iou`], [`giou`], and [`region_f1`] (built on [`match_regions`]) implement the
+//! roadmap's Stage 2 region-level metrics (mean GIoU, per-class F1 at a COCO-style IoU
+//! threshold). The TEDS family ([`teds_struct`], [`teds`], [`teds_iou`]) implements the
+//! roadmap's table-structure metrics on a restricted table-HTML dialect, backed by a
+//! private Zhang–Shasha tree-edit-distance implementation (see the `teds` submodule).
+//! [`crate::eval`] aggregates [`match_regions`]/[`giou`] across a page dataset into a
+//! dashboard, and [`crate::eval::doclaynet`] wires that up against real DocLayNet
+//! ground truth; the TEDS family remains exercised only by its own unit tests below, as
+//! no table-structure predictor exists yet to score against PubTabNet/DocLayNet table
+//! ground truth.
 
 use crate::BBox;
 use std::collections::HashMap;
@@ -173,21 +176,46 @@ pub fn giou(predicted: BBox, ground_truth: BBox) -> f32 {
     iou - (enclosing_area - union) / enclosing_area
 }
 
-/// Region-classification F1 at a given IoU matching threshold (COCO-style), broken out
-/// per [`crate::layout::RegionClass`].
+/// Confusion counts and matched `(predicted_index, ground_truth_index)` pairs for one
+/// [`crate::layout::RegionClass`], as computed by [`match_regions`].
+///
+/// The indices in [`matches`](Self::matches) refer to positions in the *original*
+/// `predicted`/`ground_truth` slices passed to [`match_regions`], not to any
+/// per-class-filtered subset, so callers can look up the full [`crate::layout::Region`]
+/// (e.g. its `bbox`) for every matched pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassMatch {
+    /// Predictions greedily matched to a ground-truth region of the same class at or
+    /// above the matching threshold.
+    pub true_positives: usize,
+    /// Predictions left unmatched.
+    pub false_positives: usize,
+    /// Ground-truth regions left unmatched.
+    pub false_negatives: usize,
+    /// `(predicted_index, ground_truth_index)` pairs, in the order they were matched
+    /// (predictions taken highest-confidence first). Indices are into the original
+    /// slices passed to [`match_regions`].
+    pub matches: Vec<(usize, usize)>,
+}
+
+/// Greedily matches `predicted` regions to `ground_truth` regions of the same
+/// [`crate::layout::RegionClass`] at a given IoU threshold (COCO-style), broken out per
+/// class.
 ///
 /// For each class present in `predicted` or `ground_truth`: predictions are sorted by
 /// confidence (highest first) and greedily matched to the highest-IoU unmatched
 /// ground-truth region of the same class with `IoU >= iou_threshold`. Unmatched
 /// predictions count as false positives, unmatched ground-truth regions as false
-/// negatives; `F1 = 2*TP / (2*TP + FP + FN)`.
+/// negatives. [`region_f1`] and [`crate::eval`]'s dashboard aggregation are both built
+/// on this same matching, so per-class F1 and mean GIoU stay consistent with each
+/// other.
 ///
 /// Classes with no predictions and no ground truth are omitted from the result.
-pub fn region_f1(
+pub fn match_regions(
     predicted: &[crate::layout::Region],
     ground_truth: &[crate::layout::Region],
     iou_threshold: f32,
-) -> HashMap<crate::layout::RegionClass, f32> {
+) -> HashMap<crate::layout::RegionClass, ClassMatch> {
     use crate::layout::RegionClass;
 
     let mut classes: Vec<RegionClass> = predicted
@@ -198,45 +226,78 @@ pub fn region_f1(
     classes.sort_by_key(|c| *c as u8 as u32 + region_class_rank(*c));
     classes.dedup();
 
-    let mut scores = HashMap::new();
+    let mut results = HashMap::new();
 
     for class in classes {
-        let mut preds: Vec<&crate::layout::Region> =
-            predicted.iter().filter(|r| r.class == class).collect();
-        preds.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        let mut preds: Vec<(usize, &crate::layout::Region)> = predicted
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.class == class)
+            .collect();
+        preds.sort_by(|(_, a), (_, b)| b.confidence.partial_cmp(&a.confidence).unwrap());
 
-        let gts: Vec<&crate::layout::Region> =
-            ground_truth.iter().filter(|r| r.class == class).collect();
-        let mut matched = vec![false; gts.len()];
+        let gts: Vec<(usize, &crate::layout::Region)> = ground_truth
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.class == class)
+            .collect();
+        let mut gt_matched = vec![false; gts.len()];
 
-        let mut true_positives = 0usize;
-        for pred in &preds {
+        let mut matches = Vec::new();
+        for (pred_index, pred) in &preds {
             let mut best: Option<(usize, f32)> = None;
-            for (i, gt) in gts.iter().enumerate() {
-                if matched[i] {
+            for (gt_slot, (_, gt)) in gts.iter().enumerate() {
+                if gt_matched[gt_slot] {
                     continue;
                 }
                 let score = iou(pred.bbox, gt.bbox);
                 if score >= iou_threshold && best.is_none_or(|(_, b)| score > b) {
-                    best = Some((i, score));
+                    best = Some((gt_slot, score));
                 }
             }
-            if let Some((i, _)) = best {
-                matched[i] = true;
-                true_positives += 1;
+            if let Some((gt_slot, _)) = best {
+                gt_matched[gt_slot] = true;
+                matches.push((*pred_index, gts[gt_slot].0));
             }
         }
 
+        let true_positives = matches.len();
         let false_positives = preds.len() - true_positives;
         let false_negatives = gts.len() - true_positives;
-        let denom = 2 * true_positives + false_positives + false_negatives;
 
-        if denom > 0 {
-            scores.insert(class, (2 * true_positives) as f32 / denom as f32);
-        }
+        results.insert(
+            class,
+            ClassMatch {
+                true_positives,
+                false_positives,
+                false_negatives,
+                matches,
+            },
+        );
     }
 
-    scores
+    results
+}
+
+/// Region-classification F1 at a given IoU matching threshold (COCO-style), broken out
+/// per [`crate::layout::RegionClass`].
+///
+/// Matches `predicted` to `ground_truth` via [`match_regions`] and scores each class as
+/// `F1 = 2*TP / (2*TP + FP + FN)`. See [`match_regions`] for the matching rule.
+///
+/// Classes with no predictions and no ground truth are omitted from the result.
+pub fn region_f1(
+    predicted: &[crate::layout::Region],
+    ground_truth: &[crate::layout::Region],
+    iou_threshold: f32,
+) -> HashMap<crate::layout::RegionClass, f32> {
+    match_regions(predicted, ground_truth, iou_threshold)
+        .into_iter()
+        .filter_map(|(class, m)| {
+            let denom = 2 * m.true_positives + m.false_positives + m.false_negatives;
+            (denom > 0).then_some((class, (2 * m.true_positives) as f32 / denom as f32))
+        })
+        .collect()
 }
 
 /// Stable ordering key for [`crate::layout::RegionClass`] used only to make

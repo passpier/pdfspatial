@@ -1,0 +1,8 @@
+{
+  "cells": [
+    { "text": "Header", "bbox": [100.0, 20.0, 300.0, 25.0], "font_size": 9.0 },
+    { "text": "Report Title", "bbox": [100.0, 120.0, 400.0, 40.0], "font_size": 24.0 },
+    { "text": "Body text sample.", "bbox": [100.0, 200.0, 400.0, 120.0], "font_size": 10.0 },
+    { "text": "Page 1", "bbox": [100.0, 980.0, 300.0, 20.0], "font_size": 9.0 }
+  ]
+}

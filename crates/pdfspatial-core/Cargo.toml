@@ -21,9 +21,19 @@ path = "src/lib.rs"
 name = "basic_extract"
 path = "../../examples/basic_extract.rs"
 
+[[example]]
+name = "doclaynet_eval"
+path = "../../examples/doclaynet_eval.rs"
+required-features = ["doclaynet"]
+
+[features]
+doclaynet = ["dep:serde", "dep:serde_json"]
+
 [dependencies]
 pdfium-render = "0.9"
 thiserror = "2"
 rayon = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]

@@ -6,11 +6,12 @@
 //!
 //! 1. **Baseline extraction** (implemented) — a deterministic, OCR-free text extraction
 //!    floor built directly on PDFium's native text layer. See [`extract`].
-//! 2. **Validation** (metrics implemented; no dataset harness) — structural-fidelity
-//!    scoring: [`metrics::giou`], [`metrics::region_f1`], and the TEDS family
-//!    ([`metrics::teds_struct`], [`metrics::teds`], [`metrics::teds_iou`]) are pure,
-//!    tested functions. Wiring them up against held-out layout ground truth (e.g.
-//!    DocLayNet) is separate future work.
+//! 2. **Validation** — structural-fidelity scoring: [`metrics::giou`],
+//!    [`metrics::region_f1`], and the TEDS family ([`metrics::teds_struct`],
+//!    [`metrics::teds`], [`metrics::teds_iou`]) are pure, tested functions, aggregated
+//!    across a page dataset by [`eval::evaluate_pages`] into a [`eval::Stage2Report`].
+//!    The `doclaynet` cargo feature adds [`eval::doclaynet`], a loader that scores
+//!    [`layout::classify_regions`] against real DocLayNet ground truth.
 //! 3. **Error analysis** — clustering Stage 2 shortfalls into a reproducible failure-mode
 //!    taxonomy. See [`assemble`] for the pitfall checklist this stage is organized around.
 //! 4. **Refinement** — closing the gaps found in Stage 3, heuristics first
@@ -45,6 +46,7 @@
 #![warn(clippy::all)]
 
 pub mod assemble;
+pub mod eval;
 pub mod extract;
 pub mod layout;
 pub mod metrics;

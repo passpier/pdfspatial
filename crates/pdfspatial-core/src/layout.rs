@@ -24,7 +24,7 @@ use crate::{BBox, Block, Document};
 /// scores predictions against DocLayNet ground truth. See the roadmap's Stage 2 section
 /// for per-class GIoU/F1 targets, and note that `Footnote`, `Page-header`, and
 /// `Page-footer` are called out there as the historically weakest classes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RegionClass {
     /// A caption associated with a `Picture` or `Table` region.
     Caption,
