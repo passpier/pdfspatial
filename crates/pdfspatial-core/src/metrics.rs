@@ -3,6 +3,9 @@
 //! [`char_recall`] and [`line_grouping_accuracy`] back the Stage 1 unit tests in this
 //! crate, matching the roadmap's Stage 1 metric table exactly (character extraction
 //! recall ≥ 99%, line-grouping accuracy ≥ 95% on single-column documents).
+//! [`reading_order_edit_distance`] and [`throughput_pages_per_sec`] round out that same
+//! table's two record-only rows (no pass/fail target; recorded to establish the perf
+//! floor and the ordering-error signal that drives Stage 3).
 //!
 //! [`iou`], [`giou`], and [`region_f1`] (built on [`match_regions`]) implement the
 //! roadmap's Stage 2 region-level metrics (mean GIoU, per-class F1 at a COCO-style IoU
@@ -91,6 +94,73 @@ pub fn line_grouping_accuracy(extracted_lines: &[String], ground_truth_lines: &[
         .count();
 
     matched as f32 / ground_truth_lines.len() as f32
+}
+
+/// Reading-order edit distance: the raw Levenshtein distance between the extracted token
+/// sequence and the ground-truth token sequence.
+///
+/// Matches the roadmap's Stage 1 definition verbatim — "Levenshtein distance between
+/// extracted token order and ground-truth order" — word-level (not char-level) and
+/// unnormalized (a raw edit count, not a ratio), since this metric is **record only**: the
+/// roadmap expects it to be poor on multi-column layouts and treats it as the signal that
+/// drives Stage 3 error analysis, not a pass/fail target like [`char_recall`] or
+/// [`line_grouping_accuracy`].
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::metrics::reading_order_edit_distance;
+///
+/// let extracted = ["the", "quick", "fox"];
+/// let ground_truth = ["the", "quick", "brown", "fox"];
+/// assert_eq!(reading_order_edit_distance(&extracted, &ground_truth), 1);
+/// assert_eq!(reading_order_edit_distance(&extracted, &extracted), 0);
+/// ```
+pub fn reading_order_edit_distance(extracted: &[&str], ground_truth: &[&str]) -> usize {
+    let mut dp = vec![vec![0usize; ground_truth.len() + 1]; extracted.len() + 1];
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in dp[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=extracted.len() {
+        for j in 1..=ground_truth.len() {
+            dp[i][j] = if extracted[i - 1] == ground_truth[j - 1] {
+                dp[i - 1][j - 1]
+            } else {
+                1 + dp[i - 1][j - 1].min(dp[i - 1][j]).min(dp[i][j - 1])
+            };
+        }
+    }
+    dp[extracted.len()][ground_truth.len()]
+}
+
+/// Throughput, in pages per second, for a batch of `page_count` pages extracted in
+/// `elapsed` wall-clock time.
+///
+/// Matches the roadmap's Stage 1 definition — "Pages/sec on reference hardware (single
+/// core, no OCR)" — and is **record only**: the roadmap treats it as establishing the perf
+/// floor for later stages, not a pass/fail target.
+///
+/// Returns `0.0` if `elapsed` is zero (avoids dividing by zero on a degenerate timing).
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::metrics::throughput_pages_per_sec;
+/// use std::time::Duration;
+///
+/// let throughput = throughput_pages_per_sec(10, Duration::from_secs(2));
+/// assert_eq!(throughput, 5.0);
+/// assert_eq!(throughput_pages_per_sec(10, Duration::ZERO), 0.0);
+/// ```
+pub fn throughput_pages_per_sec(page_count: usize, elapsed: std::time::Duration) -> f64 {
+    let secs = elapsed.as_secs_f64();
+    if secs == 0.0 {
+        return 0.0;
+    }
+    page_count as f64 / secs
 }
 
 /// Area of a [`BBox`], in square points. Never negative (mirrors [`BBox::width`]/

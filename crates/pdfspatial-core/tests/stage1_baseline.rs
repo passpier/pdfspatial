@@ -111,6 +111,60 @@ fn stage1_block_grouping_separates_paragraphs_on_vertical_gap() {
 }
 
 #[test]
+fn stage1_reading_order_is_lossless_on_single_column() {
+    let document = extract_fixture("single_column.pdf");
+
+    let extracted_tokens: Vec<&str> = document
+        .pages
+        .iter()
+        .flat_map(|page| &page.blocks)
+        .flat_map(|block| &block.lines)
+        .flat_map(|line| &line.words)
+        .map(|word| word.text.as_str())
+        .collect();
+
+    let ground_truth_tokens: Vec<&str> = GROUND_TRUTH.split_whitespace().collect();
+
+    let distance = metrics::reading_order_edit_distance(&extracted_tokens, &ground_truth_tokens);
+    eprintln!(
+        "reading-order edit distance (single-column, record only): {distance} \
+         ({} extracted tokens vs. {} ground-truth tokens)",
+        extracted_tokens.len(),
+        ground_truth_tokens.len()
+    );
+
+    assert_eq!(
+        distance, 0,
+        "single-column reading order should be lossless -- this is the Stage 1 exit \
+         criterion; extracted: {extracted_tokens:?}, ground truth: {ground_truth_tokens:?}"
+    );
+}
+
+#[test]
+fn stage1_throughput_is_recorded() {
+    const ITERATIONS: usize = 5;
+
+    let start = std::time::Instant::now();
+    for _ in 0..ITERATIONS {
+        let document = extract_fixture("single_column.pdf");
+        std::hint::black_box(&document);
+    }
+    let elapsed = start.elapsed();
+
+    let page_count = ITERATIONS; // one page per extraction
+    let throughput = metrics::throughput_pages_per_sec(page_count, elapsed);
+    eprintln!(
+        "throughput (single core, no OCR, record only): {throughput:.2} pages/sec \
+         ({page_count} pages in {elapsed:?})"
+    );
+
+    assert!(
+        throughput.is_finite() && throughput > 0.0,
+        "expected a positive, finite throughput reading, got {throughput}"
+    );
+}
+
+#[test]
 fn stage1_renders_pages_in_parallel() {
     let rendered = pdfspatial_core::extract::render_pages_parallel(
         &fixture_path("single_column.pdf"),
