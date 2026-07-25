@@ -143,6 +143,15 @@ fn corpus_cases_meet_expected_behavior() {
             for mismatch in &outcome.mismatches {
                 report.push_str(&format!("      {mismatch}\n"));
             }
+            if let Some(distance) = outcome.reading_order_edit_distance {
+                report.push_str(&format!(
+                    "      reading-order edit distance: {distance} (naive input order: {})\n",
+                    outcome
+                        .naive_reading_order_edit_distance
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                ));
+            }
         }
         report.push_str(&format!(
             "\n{} / {} cases failing.\n",
@@ -151,4 +160,45 @@ fn corpus_cases_meet_expected_behavior() {
         ));
         panic!("{report}");
     }
+}
+
+/// Positive contrast to the (still-failing, `#[ignore]`d) scoreboard above: a wide
+/// column gutter clears `assemble::MIN_CUT_FRACTION`, so `assemble_reading_order`
+/// recovers the correct column-major order even though the case is authored in the
+/// naive (interleaved) order Stage 1's baseline would emit. This demonstrates the
+/// roadmap's predicted reading-order edit-distance degradation (Stage 1 baseline,
+/// `naive_reading_order_edit_distance`) alongside its recovery
+/// (`reading_order_edit_distance == 0` post-assembly) -- not a desired-but-unimplemented
+/// behavior, so unlike `corpus_cases_meet_expected_behavior` this runs unconditionally.
+#[test]
+fn multi_column_wide_gutter_recovers_reading_order() {
+    let cases = load_corpus(&corpus_dir()).expect("corpus should load without error");
+    let case = cases
+        .iter()
+        .find(|c| c.id == "multi_column-wide-gutter-recovers-column-order")
+        .expect("wide-gutter contrast fixture should be present in the corpus");
+
+    let outcome = evaluate_case(case);
+
+    let naive = outcome
+        .naive_reading_order_edit_distance
+        .expect("case has expected.reading_order");
+    let assembled = outcome
+        .reading_order_edit_distance
+        .expect("case has expected.reading_order");
+    eprintln!(
+        "multi-column wide-gutter contrast: naive reading-order edit distance = {naive}, \
+         post-assembly = {assembled}"
+    );
+
+    assert!(
+        naive > 0,
+        "naive (as-authored) block order should already be degraded relative to ground truth"
+    );
+    assert_eq!(
+        assembled, 0,
+        "assemble_reading_order should fully recover column-major order once the gutter \
+         clears MIN_CUT_FRACTION"
+    );
+    assert!(outcome.passed);
 }

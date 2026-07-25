@@ -1,0 +1,21 @@
+{
+  "id": "multi_column-wide-gutter-recovers-column-order",
+  "pitfall": "multi_column",
+  "root_cause": "ordering",
+  "description": "Positive contrast to the narrow-gutter cases: a 40pt gutter, above assemble.rs's MIN_CUT_FRACTION (3% of a 600pt-wide page = 18pt). Blocks are authored in naive top-to-bottom/left-to-right emit order (row-major, interleaving the two columns) -- the same degraded order Stage 1's baseline would produce. Because the gutter clears the threshold, xy_cut_order's vertical cut fires, recovering column-major reading order (left column fully before right). This demonstrates the roadmap's predicted reading-order edit-distance degradation (Stage 1, naive order vs. ground truth) alongside its recovery (post-assemble_reading_order, residual distance 0) in one case.",
+  "page": {
+    "width": 600.0,
+    "height": 800.0,
+    "blocks": [
+      { "lines": [ { "text": "Left row one", "bbox": [40.0, 700.0, 280.0, 750.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Right row one", "bbox": [320.0, 700.0, 560.0, 750.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Left row two", "bbox": [40.0, 640.0, 280.0, 690.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Right row two", "bbox": [320.0, 640.0, 560.0, 690.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Left row three", "bbox": [40.0, 580.0, 280.0, 630.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Right row three", "bbox": [320.0, 580.0, 560.0, 630.0], "font_size": 10.0 } ] }
+    ]
+  },
+  "expected": {
+    "reading_order": ["Left row one", "Left row two", "Left row three", "Right row one", "Right row two", "Right row three"]
+  }
+}

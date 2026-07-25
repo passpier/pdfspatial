@@ -104,9 +104,20 @@ Every seeded case's `expected` block states what the pipeline *should* do once S
 lands the corresponding fix -- not a snapshot of today's (wrong) output. Running
 `cargo test --features stage3 -- --ignored` executes
 `corpus_cases_meet_expected_behavior`, which is `#[ignore]`d for exactly this reason: it
-currently fails for all 18 seeded cases, printing a scoreboard of every mismatch. That
-failing run *is* the executable Stage 3 error analysis -- re-run it after any Stage 4
-heuristic change to see which cases flip to passing.
+currently fails for 18 of the corpus's 19 cases, printing a scoreboard of every mismatch.
+The one exception, `multi_column-wide-gutter-recovers-column-order`
+(`fixtures/multi_column/`), is a *positive contrast* case -- its gutter is wide enough for
+`assemble::MIN_CUT_FRACTION` to fire, so it passes today and is checked unconditionally by
+`tests/stage3_corpus.rs`'s `multi_column_wide_gutter_recovers_reading_order`, not the
+`#[ignore]`d scoreboard. That failing run *is* the executable Stage 3 error analysis --
+re-run it after any Stage 4 heuristic change to see which cases flip to passing.
+
+For every case with `expected.reading_order`, `CaseOutcome` (from `eval::corpus`) also
+reports `reading_order_edit_distance` (post-`assemble_reading_order`, using
+`metrics::reading_order_edit_distance`) and `naive_reading_order_edit_distance` (the
+as-authored input order vs. ground truth) -- quantifying the roadmap's Stage 1 "reading-order
+edit distance" prediction rather than only reporting a pass/fail boolean. The scoreboard
+prints both numbers for every failing ordering case.
 
 Two tests run unconditionally (not `#[ignore]`d) to guard the corpus's own integrity
 regardless of pipeline behavior: `corpus_is_wellformed` (every case parses, ids are
@@ -117,8 +128,8 @@ per-pitfall coverage report on stderr).
 
 ## Coverage: seeded vs. deferred
 
-Seeded (9 pitfalls, 2 cases each, 18 total -- reachable through the synthetic
-`classify_regions`/`assemble_reading_order` surface):
+Seeded (9 pitfalls, 2 cases each plus one `multi_column` positive-contrast case, 19 total --
+reachable through the synthetic `classify_regions`/`assemble_reading_order` surface):
 
 | Pitfall | Root cause |
 |---|---|

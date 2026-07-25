@@ -132,6 +132,19 @@ pub struct CaseOutcome {
     pub passed: bool,
     /// Human-readable descriptions of every mismatch found, empty if `passed`.
     pub mismatches: Vec<String>,
+    /// [`reading_order_edit_distance`](crate::metrics::reading_order_edit_distance)
+    /// between [`assemble_reading_order`]'s output and `expected.reading_order`, i.e.
+    /// the post-assembly residual. `None` if the case has no `expected.reading_order`.
+    /// Quantifies the roadmap's Stage 1 "reading-order edit distance" metric on the
+    /// *fixed* (or still-broken) order, as opposed to
+    /// [`Self::naive_reading_order_edit_distance`]'s pre-fix baseline.
+    pub reading_order_edit_distance: Option<usize>,
+    /// [`reading_order_edit_distance`](crate::metrics::reading_order_edit_distance)
+    /// between the case's authored (as-emitted) block order and
+    /// `expected.reading_order`, i.e. the naive degradation the roadmap predicts before
+    /// [`assemble_reading_order`] runs. `None` if the case has no
+    /// `expected.reading_order`.
+    pub naive_reading_order_edit_distance: Option<usize>,
 }
 
 // --- On-disk schema (private; the corpus's own JSON authoring format) -----------
@@ -435,6 +448,8 @@ fn document_from_blocks(page: &PageFile) -> Document {
 /// fixed yet — see the [module docs](self) on desired- vs. current-behavior.
 pub fn evaluate_case(case: &RegressionCase) -> CaseOutcome {
     let mut mismatches = Vec::new();
+    let mut reading_order_edit_distance = None;
+    let mut naive_reading_order_edit_distance = None;
 
     if let Some(expected_order) = &case.expected.reading_order {
         let reordered = assemble_reading_order(&case.document);
@@ -445,6 +460,23 @@ pub fn evaluate_case(case: &RegressionCase) -> CaseOutcome {
                 "reading order mismatch: expected {expected_order:?}, got {actual_order:?}"
             ));
         }
+
+        let naive_order: Vec<String> = case.document.pages[0]
+            .blocks
+            .iter()
+            .map(|b| b.text())
+            .collect();
+        let expected_refs: Vec<&str> = expected_order.iter().map(String::as_str).collect();
+        let actual_refs: Vec<&str> = actual_order.iter().map(String::as_str).collect();
+        let naive_refs: Vec<&str> = naive_order.iter().map(String::as_str).collect();
+        reading_order_edit_distance = Some(crate::metrics::reading_order_edit_distance(
+            &actual_refs,
+            &expected_refs,
+        ));
+        naive_reading_order_edit_distance = Some(crate::metrics::reading_order_edit_distance(
+            &naive_refs,
+            &expected_refs,
+        ));
     }
 
     if !case.expected.classes.is_empty() {
@@ -478,6 +510,8 @@ pub fn evaluate_case(case: &RegressionCase) -> CaseOutcome {
         case_id: case.id.clone(),
         passed: mismatches.is_empty(),
         mismatches,
+        reading_order_edit_distance,
+        naive_reading_order_edit_distance,
     }
 }
 
@@ -581,6 +615,49 @@ mod tests {
 
         let result = load_case(&path);
         assert!(matches!(result, Err(CorpusError::DuplicateBlockText(_))));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const MULTI_COLUMN_CASE: &str = r#"
+    {
+        "id": "test-multi-column",
+        "pitfall": "multi_column",
+        "root_cause": "ordering",
+        "description": "Two columns authored in interleaved (naive) order, with a gutter wide enough for xy_cut_order to recover column-major order.",
+        "page": {
+            "width": 600.0,
+            "height": 800.0,
+            "blocks": [
+                { "lines": [ { "text": "Left row one", "bbox": [40.0, 700.0, 280.0, 750.0], "font_size": 10.0 } ] },
+                { "lines": [ { "text": "Right row one", "bbox": [320.0, 700.0, 560.0, 750.0], "font_size": 10.0 } ] },
+                { "lines": [ { "text": "Left row two", "bbox": [40.0, 640.0, 280.0, 690.0], "font_size": 10.0 } ] },
+                { "lines": [ { "text": "Right row two", "bbox": [320.0, 640.0, 560.0, 690.0], "font_size": 10.0 } ] }
+            ]
+        },
+        "expected": {
+            "reading_order": ["Left row one", "Left row two", "Right row one", "Right row two"]
+        }
+    }
+    "#;
+
+    #[test]
+    fn evaluate_case_reports_reading_order_edit_distances() {
+        let dir = std::env::temp_dir().join("pdfspatial_corpus_test_edit_distance");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_case(&dir, "case.json", MULTI_COLUMN_CASE);
+
+        let case = load_case(&path).expect("case should load");
+        let outcome = evaluate_case(&case);
+
+        // The wide gutter clears `MIN_CUT_FRACTION`, so `assemble_reading_order`
+        // recovers the expected column-major order exactly.
+        assert!(outcome.passed);
+        assert_eq!(outcome.reading_order_edit_distance, Some(0));
+        // The naive (as-authored, interleaved) order is worse than the assembled one --
+        // this is the roadmap's predicted Stage 1 degradation on multi-column layouts.
+        assert!(outcome.naive_reading_order_edit_distance.unwrap() > 0);
+        assert!(outcome.naive_reading_order_edit_distance > outcome.reading_order_edit_distance);
 
         std::fs::remove_dir_all(&dir).ok();
     }

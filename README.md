@@ -43,11 +43,15 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    `classification`, `ordering`). See [`assemble.rs`](crates/pdfspatial-core/src/assemble.rs)
    for the `Pitfall`/`RootCause` taxonomy, [`eval/corpus.rs`](crates/pdfspatial-core/src/eval/corpus.rs)
    (gated behind the `stage3` feature) for the loader/checker, and
-   [`fixtures/`](fixtures) for the corpus itself — 18 seeded cases across 9 pitfalls
+   [`fixtures/`](fixtures) for the corpus itself — 19 seeded cases across 9 pitfalls
    reachable through the pure-Rust classify/assemble surface, with the remaining
    extraction-layer pitfalls documented as deferred pending real PDFium/DocLayNet
    fixtures. Each case's expected behavior is the desired *post-Stage-4* outcome, so the
-   corpus's behavioral test is `#[ignore]`d and fails today by design — see
+   corpus's behavioral test is `#[ignore]`d and fails today by design for 18 of the 19
+   cases — the exception, a `multi_column` case with a gutter wide enough for the
+   XY-cut heuristic to recover correct order, quantifies the roadmap's predicted
+   reading-order edit-distance degradation (via `metrics::reading_order_edit_distance`,
+   now surfaced by `eval::corpus::CaseOutcome`) alongside its recovery. See
    `fixtures/README.md`.
 4. **Refinement** (heuristics implemented; fine-tuning stubbed) — [`layout.rs`](crates/pdfspatial-core/src/layout.rs)
    classifies regions with deterministic text-layer heuristics (Title, SectionHeader,
