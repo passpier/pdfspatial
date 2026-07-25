@@ -38,7 +38,7 @@ use crate::{BBox, Block, Char, Document, Line, Page, Word};
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::{Stage2Report, evaluate_pages};
+use super::{PageReorderRank, Stage2Report, evaluate_pages, rank_pages_by_reorder};
 
 /// A single-cell font size assumed for `pdf_cells` entries that don't carry one (the
 /// DocLayNet `pdf_cells` schema doesn't always include font metrics), used only so
@@ -412,6 +412,65 @@ pub fn evaluate_sample(sample: &DocLayNetSample, iou_threshold: f32) -> Stage2Re
     evaluate_pages(&pages, iou_threshold)
 }
 
+/// One DocLayNet page's Stage 3 mining rank: its
+/// [`PageReorderRank`](super::PageReorderRank) plus the identifiers needed to locate
+/// the source page for minimal-repro extraction.
+#[derive(Debug, Clone)]
+pub struct MinedPage {
+    /// The page's DocLayNet COCO `image_id`, matching [`DocLayNetPage::image_id`].
+    pub image_id: i64,
+    /// The page's rendered-image file name, matching [`DocLayNetPage::file_name`] --
+    /// also the key for locating a source PDF (see `examples/doclaynet_mine.rs`'s
+    /// `--pdfium` mode).
+    pub file_name: String,
+    /// The reordering-severity rank for this page.
+    pub rank: PageReorderRank,
+}
+
+/// Ranks every page in `sample` by reading-order reordering severity -- the Stage 3
+/// failure-cluster prioritization signal described in [`super::rank_pages_by_reorder`]
+/// -- reconstructing each page's [`Document`] text-only via [`document_from_cells`], so
+/// this needs no native PDFium. Most-reordered-first, i.e. the pages worth mining into
+/// minimal-repro `fixtures/` cases next.
+///
+/// A caller with a real PDFium library available can instead rank real
+/// [`crate::extract_baseline`] output by calling [`super::rank_pages_by_reorder`]
+/// directly on documents built from the source PDFs (see `examples/doclaynet_mine.rs`'s
+/// `--pdfium` mode) -- this function's text-only path exists so mining stays runnable
+/// with nothing but a DocLayNet download.
+pub fn mine_reading_order_failures(sample: &DocLayNetSample) -> Vec<MinedPage> {
+    let mut mined: Vec<MinedPage> = sample
+        .pages
+        .iter()
+        .map(|page| {
+            let document = document_from_cells(page);
+            // Each DocLayNet page reconstructs to a single-page `Document`, so there is
+            // exactly one rank to pull out.
+            let rank = rank_pages_by_reorder(&document)
+                .into_iter()
+                .next()
+                .unwrap_or(PageReorderRank {
+                    page_index: 0,
+                    block_count: 0,
+                    reorder_edit_distance: 0,
+                });
+            MinedPage {
+                image_id: page.image_id,
+                file_name: page.file_name.clone(),
+                rank,
+            }
+        })
+        .collect();
+
+    mined.sort_by(|a, b| {
+        b.rank
+            .reorder_edit_distance
+            .cmp(&a.rank.reorder_edit_distance)
+            .then(a.image_id.cmp(&b.image_id))
+    });
+    mined
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +558,62 @@ mod tests {
         assert_eq!(document.pages.len(), 1);
         assert_eq!(document.pages[0].blocks.len(), 1);
         assert_eq!(document.pages[0].blocks[0].text(), "Hello");
+    }
+
+    fn cell(text: &str, left: f32, bottom: f32, right: f32, top: f32) -> PdfCell {
+        PdfCell {
+            text: text.into(),
+            bbox: BBox {
+                left,
+                bottom,
+                right,
+                top,
+            },
+            font_size: DEFAULT_FONT_SIZE,
+        }
+    }
+
+    #[test]
+    fn mine_reading_order_failures_ranks_multi_column_page_above_single_column() {
+        // Two columns, cells authored interleaved (naive reading order) with a 40pt
+        // gutter on a 600pt-wide page -- well above assemble::MIN_CUT_FRACTION, so
+        // assemble_reading_order recovers column-major order and this page reorders
+        // heavily relative to the naive order document_from_cells preserves.
+        let multi_column = DocLayNetPage {
+            image_id: 2,
+            file_name: "page_0002.png".into(),
+            width: 600.0,
+            height: 800.0,
+            ground_truth: vec![],
+            cells: vec![
+                cell("Right one", 320.0, 700.0, 560.0, 750.0),
+                cell("Left one", 40.0, 700.0, 280.0, 750.0),
+                cell("Right two", 320.0, 640.0, 560.0, 690.0),
+                cell("Left two", 40.0, 640.0, 280.0, 690.0),
+            ],
+        };
+        let single_column = DocLayNetPage {
+            image_id: 1,
+            file_name: "page_0001.png".into(),
+            width: 600.0,
+            height: 800.0,
+            ground_truth: vec![],
+            cells: vec![
+                cell("First", 40.0, 700.0, 560.0, 750.0),
+                cell("Second", 40.0, 600.0, 560.0, 650.0),
+            ],
+        };
+
+        let sample = DocLayNetSample {
+            pages: vec![single_column, multi_column],
+        };
+        let mined = mine_reading_order_failures(&sample);
+
+        assert_eq!(mined.len(), 2);
+        assert_eq!(mined[0].image_id, 2);
+        assert_eq!(mined[0].file_name, "page_0002.png");
+        assert!(mined[0].rank.reorder_edit_distance > 0);
+        assert_eq!(mined[1].image_id, 1);
+        assert_eq!(mined[1].rank.reorder_edit_distance, 0);
     }
 }

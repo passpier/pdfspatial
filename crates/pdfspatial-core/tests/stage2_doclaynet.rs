@@ -11,7 +11,9 @@
 
 use pdfspatial_core::BBox;
 use pdfspatial_core::eval::Stage2Report;
-use pdfspatial_core::eval::doclaynet::{coco_bbox_to_bbox, evaluate_sample, load_sample};
+use pdfspatial_core::eval::doclaynet::{
+    coco_bbox_to_bbox, evaluate_sample, load_sample, mine_reading_order_failures,
+};
 use pdfspatial_core::layout::RegionClass;
 use std::path::PathBuf;
 
@@ -102,4 +104,22 @@ fn evaluate_sample_scores_text_only_predictions_against_fixture() {
     assert_eq!(report.support[&RegionClass::Title], 1);
     assert_eq!(report.support[&RegionClass::Text], 1);
     assert_eq!(report.support[&RegionClass::PageFooter], 1);
+}
+
+/// The fixture's 4 cells are single-column and already top-to-bottom in the naive
+/// (as-authored) order, so `assemble_reading_order`'s XY-cut leaves them untouched --
+/// this is a real, if quiet, end-to-end check that the mining wiring runs the whole
+/// load -> reconstruct -> rank pipeline correctly, not just that it compiles.
+#[test]
+fn mine_reading_order_failures_ranks_the_fixture_page_with_zero_distance() {
+    let dir = fixtures_dir();
+    let sample = load_sample(&dir.join("coco.json"), &dir).expect("fixture should load");
+
+    let mined = mine_reading_order_failures(&sample);
+
+    assert_eq!(mined.len(), 1);
+    assert_eq!(mined[0].image_id, 1);
+    assert_eq!(mined[0].file_name, "page_0001.png");
+    assert_eq!(mined[0].rank.block_count, 4);
+    assert_eq!(mined[0].rank.reorder_edit_distance, 0);
 }

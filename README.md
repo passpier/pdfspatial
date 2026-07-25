@@ -52,7 +52,13 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    XY-cut heuristic to recover correct order, quantifies the roadmap's predicted
    reading-order edit-distance degradation (via `metrics::reading_order_edit_distance`,
    now surfaced by `eval::corpus::CaseOutcome`) alongside its recovery. See
-   `fixtures/README.md`.
+   `fixtures/README.md`. The same naive-vs-assembled edit-distance delta now also drives
+   real-sample mining: `eval::rank_pages_by_reorder` (and, behind the `doclaynet`
+   feature, `eval::doclaynet::mine_reading_order_failures`) ranks a DocLayNet sample's
+   pages by how heavily `assemble_reading_order` reordered them — an unsupervised proxy
+   for "which pages most likely have a Stage 1 reading-order failure worth mining into a
+   `fixtures/` regression case next," since DocLayNet itself ships no gold reading order.
+   See `examples/doclaynet_mine.rs`.
 4. **Refinement** (heuristics implemented; fine-tuning stubbed) — [`layout.rs`](crates/pdfspatial-core/src/layout.rs)
    classifies regions with deterministic text-layer heuristics (Title, SectionHeader,
    ListItem, Caption, PageHeader/Footer, Text — `Table`/`Picture`/`Formula` need the
@@ -132,6 +138,14 @@ loads a vendored, hand-authored DocLayNet-format fixture and scores
 
 ```sh
 cargo test --features doclaynet
+```
+
+The same fixture also exercises the Stage 3 mining signal end-to-end
+(`mine_reading_order_failures`), and `examples/doclaynet_mine.rs` prints it as a ranked
+report against a real DocLayNet sample:
+
+```sh
+cargo run --example doclaynet_mine --features doclaynet -- <coco.json> <cells_dir>
 ```
 
 ### Running benchmarks
