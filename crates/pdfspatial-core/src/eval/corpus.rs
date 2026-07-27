@@ -13,17 +13,23 @@
 //!
 //! # Why synthetic `Document`s, not real PDFs
 //!
-//! The roadmap's Stage 3 process describes extracting a minimal-repro *PDF page* for
-//! each failure cluster. Building and running those requires a native PDFium library
-//! and a real DocLayNet sample to mine failures from — neither is available in every
-//! environment this crate builds in. Each case here instead encodes an
-//! already-extracted [`Document`] directly (the same PDFium-free substrate
-//! `tests/stage2_pipeline.rs` uses), so the corpus stays runnable anywhere `cargo test`
-//! runs. This narrows coverage to pitfalls reachable through the
-//! [`classify_regions`]/[`assemble_reading_order`] surface — pitfalls that are
-//! fundamentally about character-level extraction (rotated text, CID-keyed fonts,
-//! overlapping z-ordered text) or cross-page stitching cannot be reproduced this way,
-//! and are deliberately left unseeded (see `fixtures/README.md`).
+//! Most cases here encode an already-extracted [`Document`] directly (the same
+//! PDFium-free substrate `tests/stage2_pipeline.rs` uses), so the corpus stays runnable
+//! anywhere `cargo test` runs — no native PDFium library or DocLayNet download needed.
+//! This is the only way to reach pitfalls that live entirely in the
+//! [`classify_regions`]/[`assemble_reading_order`] surface.
+//!
+//! A minority of cases (geometric extraction-layer pitfalls: rotated text, CID-keyed
+//! fonts, overlapping z-ordered text, cross-page stitching) are fundamentally about
+//! what PDFium's real text layer produces, which a hand-assembled `Document` can't
+//! reproduce. Those cases instead carry a `source_pdf` pointing at a small fixture PDF
+//! under `crates/pdfspatial-core/tests/fixtures/stage3/`, and their `page`/`pages` is a
+//! **frozen snapshot** of `extract_baseline`'s real output on that PDF, generated once
+//! by `examples/stage3_pdf_cases.rs` — not hand-typed. The corpus itself stays
+//! PDFium-free to load (the snapshot is just JSON); a separate test
+//! (`tests/stage3_pdf_fixtures.rs`, needing PDFium) re-extracts each `source_pdf` and
+//! checks the snapshot hasn't drifted. See `fixtures/README.md`'s "PDF-backed cases"
+//! section.
 //!
 //! # Desired-behavior assertions, not current-behavior snapshots
 //!
@@ -85,6 +91,12 @@ pub enum CorpusError {
         /// The path that already existed.
         path: PathBuf,
     },
+    /// A case's on-disk `page`/`pages` fields didn't specify exactly one of the two.
+    #[error("case at {path} must specify exactly one of `page` or `pages`")]
+    PageSpec {
+        /// The file that specified zero or both.
+        path: PathBuf,
+    },
 }
 
 /// A single Stage 3 regression case: a minimal-repro [`Document`] tagged with the
@@ -100,14 +112,21 @@ pub struct RegressionCase {
     pub root_cause: RootCause,
     /// A human-readable description of the failure this case reproduces.
     pub description: String,
-    /// The minimal-repro document: a single synthetic page built directly in the
-    /// crate's coordinate space, deliberately shaped to trigger the pitfall.
+    /// The minimal-repro document: either a single synthetic page built directly in
+    /// the crate's coordinate space (deliberately shaped to trigger the pitfall), or —
+    /// for cases with a [`source_pdf`](Self::source_pdf) — a frozen snapshot of
+    /// [`crate::extract_baseline`]'s real output on that PDF.
     pub document: Document,
     /// The behavior [`classify_regions`]/[`assemble_reading_order`] should exhibit on
     /// [`document`](Self::document) once the pitfall is fixed.
     pub expected: ExpectedBehavior,
     /// The file this case was loaded from, kept for diagnostics.
     pub source_path: PathBuf,
+    /// For extraction-layer (`geometric`) cases whose `document` is a frozen
+    /// [`crate::extract_baseline`] snapshot rather than a hand-authored `Document`: the
+    /// workspace-relative path to the PDF it was extracted from. `None` for
+    /// hand-authored cases. See the [module docs](self).
+    pub source_pdf: Option<PathBuf>,
     /// `true` if this case was auto-mined by [`write_draft_case`] and not yet
     /// human-reviewed. A draft's `expected` is a snapshot of the pipeline's *current*
     /// behavior (from [`assemble_reading_order`] at mining time), not desired post-fix
@@ -127,6 +146,15 @@ pub struct ExpectedBehavior {
     /// The desired [`RegionClass`] for each named block, if this case exercises
     /// classification behavior. Empty if the case doesn't check classification.
     pub classes: Vec<ExpectedClass>,
+    /// `true` if this case's expectations name text that the current extractor
+    /// doesn't yet produce (e.g. a desired `"x² + y² = z²"` where extraction today
+    /// yields several split blocks) — i.e. the case documents a desired *post-Stage-1-
+    /// fix* extraction, not just a post-Stage-4 reordering/classification. Cases
+    /// setting this flag are exempt from `corpus_is_wellformed`'s "every expected
+    /// string resolves to a real block" check, but must still name at least one string
+    /// that genuinely doesn't resolve (enforced by that same test) and must carry a
+    /// [`RegressionCase::source_pdf`], so the flag can't be set spuriously.
+    pub requires_extraction_fix: bool,
 }
 
 /// One block's desired classification, identified by its exact block text.
@@ -172,16 +200,23 @@ struct CaseFile {
     id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     draft: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_pdf: Option<String>,
     pitfall: String,
     root_cause: String,
     description: String,
-    page: PageFile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<PageFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pages: Option<Vec<PageFile>>,
     #[serde(default, skip_serializing_if = "is_default_expected")]
     expected: ExpectedFile,
 }
 
 fn is_default_expected(expected: &ExpectedFile) -> bool {
-    expected.reading_order.is_none() && expected.classes.is_empty()
+    expected.reading_order.is_none()
+        && expected.classes.is_empty()
+        && !expected.requires_extraction_fix
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -221,6 +256,8 @@ struct ExpectedFile {
     reading_order: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     classes: Vec<ExpectedClassFile>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    requires_extraction_fix: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -312,6 +349,25 @@ fn class_from_slug(slug: &str) -> Result<RegionClass, CorpusError> {
     })
 }
 
+/// The canonical slug for a [`RegionClass`], the inverse of [`class_from_slug`]. Used
+/// by [`snapshot_case_json`] to render a [`SnapshotCase`]'s expected classes back into
+/// the on-disk schema.
+fn class_slug(class: RegionClass) -> &'static str {
+    match class {
+        RegionClass::Caption => "caption",
+        RegionClass::Footnote => "footnote",
+        RegionClass::Formula => "formula",
+        RegionClass::ListItem => "list_item",
+        RegionClass::PageFooter => "page_footer",
+        RegionClass::PageHeader => "page_header",
+        RegionClass::Picture => "picture",
+        RegionClass::SectionHeader => "section_header",
+        RegionClass::Table => "table",
+        RegionClass::Text => "text",
+        RegionClass::Title => "title",
+    }
+}
+
 // --- Loading -----------------------------------------------------------------------
 
 /// Loads a single regression case from a JSON file.
@@ -336,12 +392,23 @@ pub fn load_case(path: &Path) -> Result<RegressionCase, CorpusError> {
     let pitfall = pitfall_from_slug(&case_file.pitfall)?;
     let root_cause = root_cause_from_slug(&case_file.root_cause)?;
 
-    let document = document_from_blocks(&case_file.page);
+    let pages = match (case_file.page, case_file.pages) {
+        (Some(page), None) => vec![page],
+        (None, Some(pages)) => pages,
+        (None, None) | (Some(_), Some(_)) => {
+            return Err(CorpusError::PageSpec {
+                path: path.to_path_buf(),
+            });
+        }
+    };
+    let document = document_from_pages(&pages);
 
     let mut seen_texts = std::collections::HashSet::new();
-    for block in &document.pages[0].blocks {
-        if !seen_texts.insert(block.text()) {
-            return Err(CorpusError::DuplicateBlockText(block.text()));
+    for page in &document.pages {
+        for block in &page.blocks {
+            if !seen_texts.insert(block.text()) {
+                return Err(CorpusError::DuplicateBlockText(block.text()));
+            }
         }
     }
 
@@ -366,8 +433,10 @@ pub fn load_case(path: &Path) -> Result<RegressionCase, CorpusError> {
         expected: ExpectedBehavior {
             reading_order: case_file.expected.reading_order,
             classes,
+            requires_extraction_fix: case_file.expected.requires_extraction_fix,
         },
         source_path: path.to_path_buf(),
+        source_pdf: case_file.source_pdf.map(PathBuf::from),
         draft: case_file.draft,
     })
 }
@@ -409,70 +478,77 @@ fn collect_json_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), CorpusEr
     Ok(())
 }
 
-/// Reconstructs a single-page [`Document`] from a case's `page.blocks`, so
-/// [`classify_regions`]/[`assemble_reading_order`] can run on it directly.
+/// Reconstructs a (possibly multi-page) [`Document`] from a case's `page`/`pages`
+/// blocks, so [`classify_regions`]/[`assemble_reading_order`] can run on it directly.
 ///
 /// Maps each authored line to its own [`Line`] with a single whole-line [`Word`], one
 /// [`Char`] per character (all sharing the line's own bbox and font size) --
 /// mirroring the `text_block` helper `tests/stage2_pipeline.rs` uses, extended to allow
 /// several lines per block. A block's own bbox is the union of its lines' bboxes, the
-/// same invariant [`crate::extract`]'s real block grouping maintains.
-fn document_from_blocks(page: &PageFile) -> Document {
-    let blocks = page
-        .blocks
+/// same invariant [`crate::extract`]'s real block grouping maintains. `Page::index` is
+/// assigned by position in `pages`.
+fn document_from_pages(pages: &[PageFile]) -> Document {
+    let pages = pages
         .iter()
-        .map(|block_file| {
-            let lines: Vec<Line> = block_file
-                .lines
+        .enumerate()
+        .map(|(index, page)| {
+            let blocks = page
+                .blocks
                 .iter()
-                .map(|line_file| {
-                    let bbox = BBox {
-                        left: line_file.bbox[0],
-                        bottom: line_file.bbox[1],
-                        right: line_file.bbox[2],
-                        top: line_file.bbox[3],
-                    };
-                    let chars: Vec<Char> = line_file
-                        .text
-                        .chars()
-                        .map(|ch| Char {
-                            unicode: Some(ch),
-                            bbox,
-                            font_name: "Stage3Corpus".to_string(),
-                            font_size: line_file.font_size,
+                .map(|block_file| {
+                    let lines: Vec<Line> = block_file
+                        .lines
+                        .iter()
+                        .map(|line_file| {
+                            let bbox = BBox {
+                                left: line_file.bbox[0],
+                                bottom: line_file.bbox[1],
+                                right: line_file.bbox[2],
+                                top: line_file.bbox[3],
+                            };
+                            let chars: Vec<Char> = line_file
+                                .text
+                                .chars()
+                                .map(|ch| Char {
+                                    unicode: Some(ch),
+                                    bbox,
+                                    font_name: "Stage3Corpus".to_string(),
+                                    font_size: line_file.font_size,
+                                })
+                                .collect();
+                            let word = Word {
+                                text: line_file.text.clone(),
+                                bbox,
+                                chars,
+                            };
+                            Line {
+                                text: line_file.text.clone(),
+                                bbox,
+                                words: vec![word],
+                            }
                         })
                         .collect();
-                    let word = Word {
-                        text: line_file.text.clone(),
-                        bbox,
-                        chars,
-                    };
-                    Line {
-                        text: line_file.text.clone(),
-                        bbox,
-                        words: vec![word],
-                    }
+
+                    let bbox = lines
+                        .iter()
+                        .map(|l| l.bbox)
+                        .reduce(|a, b| a.union(&b))
+                        .unwrap_or(BBox::ZERO);
+
+                    Block { bbox, lines }
                 })
                 .collect();
 
-            let bbox = lines
-                .iter()
-                .map(|l| l.bbox)
-                .reduce(|a, b| a.union(&b))
-                .unwrap_or(BBox::ZERO);
-
-            Block { bbox, lines }
+            Page {
+                index,
+                width: page.width,
+                height: page.height,
+                blocks,
+            }
         })
         .collect();
 
-    Document {
-        pages: vec![Page {
-            index: 0,
-            width: page.width,
-            height: page.height,
-            blocks,
-        }],
-    }
+    Document { pages }
 }
 
 // --- Checking ------------------------------------------------------------------
@@ -490,17 +566,23 @@ pub fn evaluate_case(case: &RegressionCase) -> CaseOutcome {
 
     if let Some(expected_order) = &case.expected.reading_order {
         let reordered = assemble_reading_order(&case.document);
-        let actual_order: Vec<String> =
-            reordered.pages[0].blocks.iter().map(|b| b.text()).collect();
+        let actual_order: Vec<String> = reordered
+            .pages
+            .iter()
+            .flat_map(|p| p.blocks.iter())
+            .map(|b| b.text())
+            .collect();
         if &actual_order != expected_order {
             mismatches.push(format!(
                 "reading order mismatch: expected {expected_order:?}, got {actual_order:?}"
             ));
         }
 
-        let naive_order: Vec<String> = case.document.pages[0]
-            .blocks
+        let naive_order: Vec<String> = case
+            .document
+            .pages
             .iter()
+            .flat_map(|p| p.blocks.iter())
             .map(|b| b.text())
             .collect();
         let expected_refs: Vec<&str> = expected_order.iter().map(String::as_str).collect();
@@ -518,7 +600,12 @@ pub fn evaluate_case(case: &RegressionCase) -> CaseOutcome {
 
     if !case.expected.classes.is_empty() {
         let regions = classify_regions(&case.document);
-        let blocks = &case.document.pages[0].blocks;
+        let blocks: Vec<&Block> = case
+            .document
+            .pages
+            .iter()
+            .flat_map(|p| p.blocks.iter())
+            .collect();
 
         for expected_class in &case.expected.classes {
             let actual = blocks
@@ -594,8 +681,32 @@ pub fn draft_case_json(draft: &DraftCase) -> Result<String, CorpusError> {
     let assembled = assemble_reading_order(&document);
     let reading_order: Vec<String> = assembled.pages[0].blocks.iter().map(|b| b.text()).collect();
 
-    let blocks: Vec<BlockFile> = draft
-        .page
+    let case_file = CaseFile {
+        id: draft.id.to_string(),
+        draft: true,
+        source_pdf: None,
+        pitfall: pitfall_slug(draft.pitfall).to_string(),
+        root_cause: root_cause_slug(draft.root_cause).to_string(),
+        description: draft.description.to_string(),
+        page: Some(page_file_from_page(draft.page)),
+        pages: None,
+        expected: ExpectedFile {
+            reading_order: Some(reading_order),
+            classes: Vec::new(),
+            requires_extraction_fix: false,
+        },
+    };
+
+    serde_json::to_string_pretty(&case_file).map_err(CorpusError::Serialize)
+}
+
+/// Converts a real [`Page`] (e.g. mined from DocLayNet, or extracted by
+/// [`crate::extract_baseline`]) into the on-disk `PageFile` schema, dropping only
+/// `Page::index` (which the schema derives from position in `page`/`pages`) and
+/// collapsing each line's per-char font sizes down to its first char's, since the
+/// schema authors one `font_size` per line, not per char.
+fn page_file_from_page(page: &Page) -> PageFile {
+    let blocks = page
         .blocks
         .iter()
         .map(|block| BlockFile {
@@ -621,20 +732,105 @@ pub fn draft_case_json(draft: &DraftCase) -> Result<String, CorpusError> {
         })
         .collect();
 
+    PageFile {
+        width: page.width,
+        height: page.height,
+        blocks,
+    }
+}
+
+/// The inputs needed to render a PDF-backed pitfall as a corpus case, consumed by
+/// [`snapshot_case_json`].
+///
+/// Unlike [`DraftCase`], a `SnapshotCase`'s `expected` is written verbatim: it's a
+/// human-authored, desired-behavior assertion (the corpus's normal convention), not an
+/// auto-filled current-behavior snapshot. Only `pages` itself is a snapshot — a frozen
+/// copy of [`crate::extract_baseline`]'s real output on `source_pdf`, taken once by
+/// `examples/stage3_pdf_cases.rs` so the corpus stays PDFium-free to load. See the
+/// [module docs](self).
+pub struct SnapshotCase<'a> {
+    /// A short, unique, human-readable identifier for this case.
+    pub id: &'a str,
+    /// Which checklist item (see [`crate::assemble`]) this case reproduces.
+    pub pitfall: Pitfall,
+    /// Whether the fix belongs in the geometric extraction layer, the region
+    /// classifier, or the reading-order assembler.
+    pub root_cause: RootCause,
+    /// A human-readable description of the failure this case reproduces.
+    pub description: &'a str,
+    /// Workspace-relative path to the PDF this case's `pages` was extracted from.
+    pub source_pdf: &'a str,
+    /// The frozen [`crate::extract_baseline`] output to encode as the case's document,
+    /// one entry per page in extraction order.
+    pub pages: &'a [Page],
+    /// The desired post-fix behavior this case checks for, written to the case file
+    /// as-is.
+    pub expected: &'a ExpectedBehavior,
+}
+
+/// Renders `case` as corpus-schema JSON carrying a `source_pdf` and a frozen
+/// `page`/`pages` snapshot, for cases whose pitfall lives in the real PDFium text
+/// layer (see the [module docs](self)).
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::eval::corpus::{ExpectedBehavior, SnapshotCase, snapshot_case_json};
+/// use pdfspatial_core::assemble::{Pitfall, RootCause};
+/// use pdfspatial_core::{BBox, Block, Char, Line, Page, Word};
+///
+/// let bbox = BBox { left: 40.0, bottom: 700.0, right: 200.0, top: 712.0 };
+/// let ch = Char { unicode: Some('x'), bbox, font_name: "Helvetica".into(), font_size: 12.0 };
+/// let word = Word { text: "x".into(), bbox, chars: vec![ch] };
+/// let line = Line { text: "x".into(), bbox, words: vec![word] };
+/// let page = Page { index: 0, width: 600.0, height: 800.0, blocks: vec![Block { bbox, lines: vec![line] }] };
+///
+/// let expected = ExpectedBehavior::default();
+/// let case = SnapshotCase {
+///     id: "example-case",
+///     pitfall: Pitfall::RotatedText,
+///     root_cause: RootCause::Geometric,
+///     description: "example",
+///     source_pdf: "crates/pdfspatial-core/tests/fixtures/stage3/rotated_text.pdf",
+///     pages: std::slice::from_ref(&page),
+///     expected: &expected,
+/// };
+///
+/// let json = snapshot_case_json(&case).unwrap();
+/// assert!(json.contains("\"source_pdf\""));
+/// ```
+///
+/// # Errors
+///
+/// Returns [`CorpusError::Serialize`] if JSON serialization fails (in practice only
+/// reachable via non-finite `f32` coordinates, which `serde_json` refuses to encode).
+pub fn snapshot_case_json(case: &SnapshotCase) -> Result<String, CorpusError> {
+    let (page, pages) = match case.pages {
+        [single] => (Some(page_file_from_page(single)), None),
+        many => (None, Some(many.iter().map(page_file_from_page).collect())),
+    };
+
     let case_file = CaseFile {
-        id: draft.id.to_string(),
-        draft: true,
-        pitfall: pitfall_slug(draft.pitfall).to_string(),
-        root_cause: root_cause_slug(draft.root_cause).to_string(),
-        description: draft.description.to_string(),
-        page: PageFile {
-            width: draft.page.width,
-            height: draft.page.height,
-            blocks,
-        },
+        id: case.id.to_string(),
+        draft: false,
+        source_pdf: Some(case.source_pdf.to_string()),
+        pitfall: pitfall_slug(case.pitfall).to_string(),
+        root_cause: root_cause_slug(case.root_cause).to_string(),
+        description: case.description.to_string(),
+        page,
+        pages,
         expected: ExpectedFile {
-            reading_order: Some(reading_order),
-            classes: Vec::new(),
+            reading_order: case.expected.reading_order.clone(),
+            classes: case
+                .expected
+                .classes
+                .iter()
+                .map(|c| ExpectedClassFile {
+                    block_text: c.block_text.clone(),
+                    class: class_slug(c.class).to_string(),
+                })
+                .collect(),
+            requires_extraction_fix: case.expected.requires_extraction_fix,
         },
     };
 

@@ -24,14 +24,23 @@ serialization) grounded in spatial (bounding-box) extraction rather than layout 
   (`tests/stage2_doclaynet.rs`), scoring `layout::classify_regions` against a vendored fixture.
 - `cargo test --features stage3` — also runs the Stage 3 regression corpus harness
   (`tests/stage3_corpus.rs`), which loads hand-authored, minimal-repro cases from `fixtures/`
-  (via `eval::corpus`) and checks their integrity. The corpus's behavioral spec
-  (`corpus_cases_meet_expected_behavior`) is `#[ignore]`d — it asserts each case's *desired*
-  post-Stage-4 behavior and fails today by design; run
-  `cargo test --features stage3 -- --ignored` to print the full scoreboard. See
-  `fixtures/README.md`. `tests/stage3_mining.rs` (gated on `doclaynet` AND `stage3`, so
-  run by `cargo test --all-features`) exercises the ranked-page → minimal-repro →
-  draft-case mining pipeline (`eval::minimize_reorder_repro`,
+  (via `eval::corpus`) and checks their integrity, including 6 PDF-backed cases whose
+  `page`/`pages` is a frozen `extract_baseline` snapshot (no PDFium needed just to load
+  them). The corpus's behavioral spec (`corpus_cases_meet_expected_behavior`) is
+  `#[ignore]`d — it asserts each case's *desired* post-Stage-4 behavior and fails today
+  by design; run `cargo test --features stage3 -- --ignored` to print the full
+  scoreboard. See `fixtures/README.md`. `tests/stage3_mining.rs` (gated on `doclaynet`
+  AND `stage3`, so run by `cargo test --all-features`) exercises the ranked-page →
+  minimal-repro → draft-case mining pipeline (`eval::minimize_reorder_repro`,
   `eval::corpus::write_draft_case`) end to end against the vendored DocLayNet fixture.
+  `tests/stage3_pdf_fixtures.rs` (also gated on `stage3`, but needs a native PDFium
+  library to do real work — see the next bullet) re-extracts each PDF-backed case's
+  source PDF and checks the committed snapshot hasn't drifted; without PDFium set up it
+  prints a skip notice unless `PDFSPATIAL_PDFIUM_LIB`/`CI` is set, in which case it fails
+  loudly instead. `examples/stage3_pdf_cases.rs` (also gated on `stage3`) is what
+  produces the 6 fixture PDFs under `crates/pdfspatial-core/tests/fixtures/stage3/` and
+  their frozen corpus snapshots in the first place — see `fixtures/README.md`'s
+  "PDF-backed cases" section before touching either.
 - `cargo test --all-features` (matches CI) — also runs `tests/stage1_baseline.rs`, which
   **requires** a native PDFium library: set `PDFSPATIAL_PDFIUM_LIB` to the lib file/dir, or place
   it on the OS dynamic-loader path (`DYLD_LIBRARY_PATH` on macOS). `pdfium-render` does not bundle

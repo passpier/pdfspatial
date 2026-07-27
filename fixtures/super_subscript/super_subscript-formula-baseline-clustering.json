@@ -1,0 +1,33 @@
+{
+  "id": "super_subscript-formula-baseline-clustering",
+  "source_pdf": "crates/pdfspatial-core/tests/fixtures/stage3/super_subscript.pdf",
+  "pitfall": "super_subscript",
+  "root_cause": "geometric",
+  "description": "A short algebraic formula whose exponents are set at 7pt on a baseline raised ~6pt above the 12pt body characters (real superscript positioning, not a synthetic already-grouped block). Word grouping keeps the whole formula on one line, but treats each exponent as its own word separated by a spurious space ('x 2 + y 2 = z 2') instead of attaching it directly to its base ('x2 + y2 = z2') -- Stage 1 has no font-size-aware notion of \"this word is a superscript of the previous one\".",
+  "page": {
+    "width": 612.0,
+    "height": 792.0,
+    "blocks": [
+      {
+        "lines": [
+          {
+            "text": "x 2 + y 2 = z 2",
+            "bbox": [
+              72.0,
+              697.468,
+              153.892,
+              712.335
+            ],
+            "font_size": 12.0
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "reading_order": [
+      "x2 + y2 = z2"
+    ],
+    "requires_extraction_fix": true
+  }
+}

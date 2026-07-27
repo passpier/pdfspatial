@@ -1,0 +1,138 @@
+{
+  "id": "rotated_text-vertical-sidebar-label",
+  "source_pdf": "crates/pdfspatial-core/tests/fixtures/stage3/rotated_text.pdf",
+  "pitfall": "rotated_text",
+  "root_cause": "geometric",
+  "description": "A normal horizontal paragraph next to a 90-degree-rotated sidebar label (`0 1 -1 0 x y Tm`). PDFium reports each rotated glyph's own tall-and-narrow (page-space) bounding box; Stage 1's line grouping assumes wide-and-flat horizontal runs, so it shatters the vertical label into one single-character line per glyph (occasionally two, when adjacent glyphs happen to overlap enough), instead of the one 'SIDEBAR LABEL' line a rotation-aware grouping pass would recover.",
+  "page": {
+    "width": 612.0,
+    "height": 792.0,
+    "blocks": [
+      {
+        "lines": [
+          {
+            "text": "Body paragraph next to a rotated sidebar label.",
+            "bbox": [
+              72.0,
+              697.468,
+              322.13995,
+              710.86
+            ],
+            "font_size": 12.0
+          }
+        ]
+      },
+      {
+        "lines": [
+          {
+            "text": "S",
+            "bbox": [
+              550.95,
+              620.0,
+              562.11,
+              626.67
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "I",
+            "bbox": [
+              550.95,
+              626.67,
+              562.11,
+              629.45
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "D",
+            "bbox": [
+              550.95,
+              629.45,
+              562.11,
+              636.67
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "E",
+            "bbox": [
+              550.95,
+              636.67,
+              562.11,
+              643.33997
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "B",
+            "bbox": [
+              550.95,
+              643.34,
+              562.11,
+              650.01
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "AR",
+            "bbox": [
+              550.95,
+              650.01,
+              562.11,
+              663.9
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "L",
+            "bbox": [
+              550.95,
+              666.68,
+              562.11,
+              672.24
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "AB",
+            "bbox": [
+              550.95,
+              672.24,
+              562.11,
+              685.58
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "E",
+            "bbox": [
+              550.95,
+              685.58,
+              562.11,
+              692.25
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "L",
+            "bbox": [
+              550.95,
+              692.25,
+              562.11,
+              697.81
+            ],
+            "font_size": 10.0
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "reading_order": [
+      "Body paragraph next to a rotated sidebar label.",
+      "SIDEBAR LABEL"
+    ],
+    "requires_extraction_fix": true
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "id": "multi_line_table_cell-wrapped-left-cell",
+  "source_pdf": "crates/pdfspatial-core/tests/fixtures/stage3/multi_line_table_cell.pdf",
+  "pitfall": "multi_line_table_cell",
+  "root_cause": "classification",
+  "description": "A borderless two-column row: the left cell wraps onto two closely-spaced lines while the right cell ('42') is a single line at the same row as the left cell's first line. Stage 1's block grouping only clusters by vertical gaps, with no notion of column gutters at the block level, so the right cell's single line gets merged straight into the left cell's block as a third line instead of staying its own cell -- losing the row/column structure entirely, not just the (still-unimplemented) Table classification on top of it.",
+  "page": {
+    "width": 612.0,
+    "height": 792.0,
+    "blocks": [
+      {
+        "lines": [
+          {
+            "text": "Item description that",
+            "bbox": [
+              72.0,
+              697.89,
+              162.04,
+              709.05
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "spans two table lines",
+            "bbox": [
+              72.0,
+              683.89,
+              164.82,
+              695.05
+            ],
+            "font_size": 10.0
+          },
+          {
+            "text": "42",
+            "bbox": [
+              340.0,
+              697.89,
+              351.12,
+              709.05
+            ],
+            "font_size": 10.0
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "classes": [
+      {
+        "block_text": "Item description that\nspans two table lines",
+        "class": "table"
+      },
+      {
+        "block_text": "42",
+        "class": "table"
+      }
+    ],
+    "requires_extraction_fix": true
+  }
+}

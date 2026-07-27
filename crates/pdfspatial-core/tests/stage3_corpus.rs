@@ -38,9 +38,11 @@ fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
-/// Every pitfall the corpus currently seeds cases for (the subset reachable through the
-/// synthetic `classify_regions`/`assemble_reading_order` surface -- see
-/// `fixtures/README.md` for the pitfalls deliberately left unseeded and why).
+/// Every pitfall the corpus currently seeds cases for -- both the pitfalls reachable
+/// through the synthetic `classify_regions`/`assemble_reading_order` surface and the
+/// PDF-backed extraction-layer pitfalls (`source_pdf`-carrying cases whose `page`/
+/// `pages` is a frozen real-PDFium snapshot; see `fixtures/README.md`'s "PDF-backed
+/// cases" section). This is every variant of `assemble::Pitfall`.
 const SEEDED_PITFALL_SLUGS: &[&str] = &[
     "multi_column",
     "footnote",
@@ -51,6 +53,12 @@ const SEEDED_PITFALL_SLUGS: &[&str] = &[
     "figure_caption",
     "section_header_vs_bold",
     "list_nesting",
+    "multi_line_table_cell",
+    "super_subscript",
+    "rotated_text",
+    "embedded_font",
+    "overlapping_text",
+    "cross_page_continuation",
 ];
 
 #[test]
@@ -68,7 +76,7 @@ fn corpus_is_wellformed() {
         );
 
         assert!(
-            !case.document.pages[0].blocks.is_empty(),
+            case.document.pages.iter().any(|p| !p.blocks.is_empty()),
             "case {:?} has an empty document",
             case.id
         );
@@ -88,30 +96,78 @@ fn corpus_is_wellformed() {
             case.id, case.pitfall, case.source_path
         );
 
-        // Every expected.classes[].block_text must name a block that actually exists.
-        let block_texts: HashSet<String> = case.document.pages[0]
-            .blocks
-            .iter()
-            .map(|b| b.text())
-            .collect();
-        for expected_class in &case.expected.classes {
+        // A PDF-backed case's source_pdf must point at a real, present file (workspace-
+        // relative), so the frozen snapshot has a checkable provenance.
+        if let Some(source_pdf) = &case.source_pdf {
+            let workspace_root = corpus_dir()
+                .parent()
+                .expect("fixtures/ has a workspace-root parent")
+                .to_path_buf();
+            let resolved = workspace_root.join(source_pdf);
             assert!(
-                block_texts.contains(&expected_class.block_text),
-                "case {:?} expects a class for block text {:?}, but no such block exists",
-                case.id,
-                expected_class.block_text
+                resolved.is_file(),
+                "case {:?} names source_pdf {source_pdf:?}, which doesn't exist at {resolved:?}",
+                case.id
             );
         }
-        if let Some(order) = &case.expected.reading_order {
-            for text in order {
+
+        // requires_extraction_fix must never be set spuriously: it's only meaningful
+        // (and only exempts the block-reference checks below) for PDF-backed cases,
+        // and it must actually name at least one string that doesn't resolve today --
+        // otherwise the flag is dead weight and the case should just be a normal
+        // desired-behavior assertion.
+        if case.expected.requires_extraction_fix {
+            assert!(
+                case.source_pdf.is_some(),
+                "case {:?} sets requires_extraction_fix but has no source_pdf",
+                case.id
+            );
+        }
+
+        // Every expected.classes[].block_text / reading_order entry must name a block
+        // that actually exists -- unless requires_extraction_fix says the expectation
+        // deliberately names text the current extractor doesn't produce yet, in which
+        // case at least one entry must genuinely fail to resolve (or the flag is
+        // spurious).
+        let block_texts: HashSet<String> = case
+            .document
+            .pages
+            .iter()
+            .flat_map(|p| p.blocks.iter())
+            .map(|b| b.text())
+            .collect();
+
+        let mut any_unresolved = false;
+        for expected_class in &case.expected.classes {
+            if !block_texts.contains(&expected_class.block_text) {
+                any_unresolved = true;
                 assert!(
-                    block_texts.contains(text),
-                    "case {:?} expects {:?} in its reading order, but no such block exists",
-                    case.id,
-                    text
+                    case.expected.requires_extraction_fix,
+                    "case {:?} expects a class for block text {:?}, but no such block \
+                     exists (and requires_extraction_fix isn't set)",
+                    case.id, expected_class.block_text
                 );
             }
         }
+        if let Some(order) = &case.expected.reading_order {
+            for text in order {
+                if !block_texts.contains(text) {
+                    any_unresolved = true;
+                    assert!(
+                        case.expected.requires_extraction_fix,
+                        "case {:?} expects {:?} in its reading order, but no such block \
+                         exists (and requires_extraction_fix isn't set)",
+                        case.id, text
+                    );
+                }
+            }
+        }
+        assert!(
+            !case.expected.requires_extraction_fix || any_unresolved,
+            "case {:?} sets requires_extraction_fix but every expected string already \
+             resolves to a real block -- the flag is spurious",
+            case.id
+        );
     }
 }
 

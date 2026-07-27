@@ -80,6 +80,19 @@ Every case must live directly under the directory matching its own `pitfall` fie
   behavior" below.
 - Either or both of `expected.reading_order`/`expected.classes` may be present,
   depending on whether the case exercises ordering, classification, or both.
+- A case authors exactly one of `page` (single page) or `pages` (a JSON array of the
+  same page shape, one entry per page in document order) -- `pages` exists for
+  `cross_page_continuation`, the one pitfall that's inherently about more than one page.
+- `source_pdf`: present only on **PDF-backed cases** (see below) -- a workspace-relative
+  path to the fixture PDF this case's `page`/`pages` was extracted from. Absent for
+  hand-authored cases.
+- `expected.requires_extraction_fix` (default `false`): set on a PDF-backed case whose
+  `expected` names text the current extractor doesn't produce yet (e.g. a desired
+  `"x2 + y2 = z2"` where extraction today yields `"x 2 + y 2 = z 2"`). It exempts that
+  case from `corpus_is_wellformed`'s normal "every expected string resolves to a real
+  block" check -- but the test still requires a `source_pdf` and at least one entry that
+  genuinely doesn't resolve, so the flag can't be set spuriously. See "PDF-backed cases"
+  below.
 
 ### `pitfall` slugs
 
@@ -104,7 +117,7 @@ Every seeded case's `expected` block states what the pipeline *should* do once S
 lands the corresponding fix -- not a snapshot of today's (wrong) output. Running
 `cargo test --features stage3 -- --ignored` executes
 `corpus_cases_meet_expected_behavior`, which is `#[ignore]`d for exactly this reason: it
-currently fails for 18 of the corpus's 19 cases, printing a scoreboard of every mismatch.
+currently fails for 24 of the corpus's 25 cases, printing a scoreboard of every mismatch.
 The one exception, `multi_column-wide-gutter-recovers-column-order`
 (`fixtures/multi_column/`), is a *positive contrast* case -- its gutter is wide enough for
 `assemble::MIN_CUT_FRACTION` to fire, so it passes today and is checked unconditionally by
@@ -126,10 +139,13 @@ unique, cases live under the directory matching their own pitfall, every
 `corpus_covers_seeded_pitfalls` (at least one case per seeded pitfall, with a
 per-pitfall coverage report on stderr).
 
-## Coverage: seeded vs. deferred
+## Coverage
 
-Seeded (9 pitfalls, 2 cases each plus one `multi_column` positive-contrast case, 19 total --
-reachable through the synthetic `classify_regions`/`assemble_reading_order` surface):
+All 15 `assemble::Pitfall` variants are seeded, 25 cases total:
+
+**Hand-authored, synthetic `Document`s** (9 pitfalls, 2 cases each plus one
+`multi_column` positive-contrast case, 19 total -- reachable through the synthetic
+`classify_regions`/`assemble_reading_order` surface, no PDF or PDFium involved):
 
 | Pitfall | Root cause |
 |---|---|
@@ -143,21 +159,62 @@ reachable through the synthetic `classify_regions`/`assemble_reading_order` surf
 | `section_header_vs_bold` | `classification` |
 | `list_nesting` | `ordering` |
 
-Deferred (index-only; documented here, not yet seeded with executable JSON):
+**PDF-backed, frozen-extraction snapshots** (6 pitfalls, 1 case each, 6 total -- see
+"PDF-backed cases" below):
 
-| Pitfall | Root cause | Why it's deferred |
+| Pitfall | Root cause | Why it needs a real PDF |
 |---|---|---|
-| `multi_line_table_cell` | `classification` | Same `Table`-unreachable gap as `borderless_table`/`merged_table_cell`; not seeded separately to avoid redundant cases pending real table-structure predictions. |
 | `super_subscript` | `geometric` | A character-extraction/baseline-clustering failure in the real PDFium text layer; a synthetic already-grouped `Document` gives Stage 1's baseline clustering nothing to get wrong. |
-| `rotated_text` | `geometric` | Same -- needs real glyph rotation data from PDFium. |
-| `embedded_font` | `geometric` | Same -- needs a real embedded/CID-keyed font to reproduce dropped/garbled glyphs. |
-| `overlapping_text` | `geometric` | Same -- needs real z-ordered text objects from a PDF. |
-| `cross_page_continuation` | `ordering` | Needs a multi-page real extraction; `assemble_reading_order` today only operates within a single page, and a synthetic multi-page `Document` wouldn't exercise the actual stitching gap PDFium extraction produces. |
+| `rotated_text` | `geometric` | Needs real glyph rotation data from PDFium's text layer. |
+| `embedded_font` | `geometric` | Needs a real custom-encoded/CID-keyed font to reproduce dropped/garbled glyphs. |
+| `overlapping_text` | `geometric` | Needs real z-ordered text objects from a PDF. |
+| `multi_line_table_cell` | `classification` | Real Stage 1 block grouping merges the row's cells together across the column gap in a way a hand-authored already-split `Document` can't demonstrate. |
+| `cross_page_continuation` | `ordering` | Needs a real multi-page extraction; `assemble_reading_order` only operates within a single page, and a synthetic multi-page `Document` wouldn't exercise the actual stitching gap PDFium extraction produces. |
 
 The roadmap's "≥ 20 samples per category" target is scoped as future work for a
-real-data DocLayNet mining pass (once PDFium and a DocLayNet sample are available in
-this environment); this corpus establishes the format, harness, and a 2-case-per-pitfall
-seed for the reachable subset.
+real-data DocLayNet mining pass (once a DocLayNet sample is available in this
+environment); this corpus establishes the format, harness, and a seed per pitfall.
+
+## PDF-backed cases
+
+The 6 pitfalls above are fundamentally about what PDFium's *real* text layer produces
+(glyph baselines, rotation matrices, encoding tables, z-order, cross-page stitching) --
+a hand-assembled `Document` gives Stage 1 nothing to get wrong, since it's already
+correctly grouped by construction. These cases instead carry a `source_pdf` pointing at
+a small fixture PDF under `crates/pdfspatial-core/tests/fixtures/stage3/`, and their
+`page`/`pages` is a **frozen snapshot** of `extract_baseline`'s real output on that PDF.
+
+The corpus itself stays PDFium-free to load -- the snapshot is committed as ordinary
+JSON, so `corpus_is_wellformed`/`corpus_covers_seeded_pitfalls`
+(`tests/stage3_corpus.rs`) run under plain `cargo test --features stage3`, same as
+every hand-authored case. A separate test, `tests/stage3_pdf_fixtures.rs` (needs
+PDFium), re-extracts each `source_pdf` and asserts the committed snapshot hasn't
+drifted -- this is what keeps "frozen snapshot" honest across PDFium version bumps or
+edits to the fixture PDFs.
+
+Both the PDFs and their snapshots are produced by `examples/stage3_pdf_cases.rs`,
+never hand-typed:
+
+```sh
+cargo run --example stage3_pdf_cases --features stage3
+```
+
+This writes the 6 PDFs (a small in-example PDF object writer, the same hand-rollable
+PDF 1.7 shape `tests/fixtures/single_column.pdf` uses, just with the `xref` offset
+bookkeeping automated), then -- if PDFium is available -- extracts each one and writes
+its case JSON. Regeneration is idempotent and never clobbers hand review: if a target
+case file already exists, its `description` and `expected` are loaded and carried
+forward unchanged, and only the frozen `page`/`pages` geometry is replaced. Pass
+`--pdfs-only` to skip the PDFium-dependent step (e.g. to inspect the PDFs without
+PDFium set up).
+
+**Never hand-edit a PDF-backed case's `page`/`pages` block** -- it's a snapshot of real
+extraction output, not hand-authored geometry; editing the JSON directly desyncs it
+from the PDF it claims to represent, and `stage3_pdf_fixtures.rs` will catch the drift.
+To change one, edit the PDF content (or `examples/stage3_pdf_cases.rs`'s content-stream
+string for that case) and re-run the generator. `description` and `expected` **are**
+meant to be hand-edited -- that's the human-review step, and the generator preserves
+your edits across regeneration as described above.
 
 ## Getting a real DocLayNet-core sample
 
@@ -241,8 +298,11 @@ Promoting a draft into the real corpus is a manual review step:
 ## Running
 
 ```sh
-# Corpus integrity (runs in CI via --all-features):
+# Corpus integrity, no PDFium needed (runs in CI via --all-features):
 cargo test --features stage3
+
+# PDF-backed snapshot drift check, needs PDFium (runs in CI via --all-features):
+cargo test --all-features
 
 # Full Stage 3 scoreboard (expected to fail until Stage 4 lands fixes):
 cargo test --features stage3 -- --ignored

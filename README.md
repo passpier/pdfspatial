@@ -43,16 +43,22 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    `classification`, `ordering`). See [`assemble.rs`](crates/pdfspatial-core/src/assemble.rs)
    for the `Pitfall`/`RootCause` taxonomy, [`eval/corpus.rs`](crates/pdfspatial-core/src/eval/corpus.rs)
    (gated behind the `stage3` feature) for the loader/checker, and
-   [`fixtures/`](fixtures) for the corpus itself — 19 seeded cases across 9 pitfalls
-   reachable through the pure-Rust classify/assemble surface, with the remaining
-   extraction-layer pitfalls documented as deferred pending real PDFium/DocLayNet
-   fixtures. Each case's expected behavior is the desired *post-Stage-4* outcome, so the
-   corpus's behavioral test is `#[ignore]`d and fails today by design for 18 of the 19
-   cases — the exception, a `multi_column` case with a gutter wide enough for the
-   XY-cut heuristic to recover correct order, quantifies the roadmap's predicted
-   reading-order edit-distance degradation (via `metrics::reading_order_edit_distance`,
-   now surfaced by `eval::corpus::CaseOutcome`) alongside its recovery. See
-   `fixtures/README.md`. The same naive-vs-assembled edit-distance delta now also drives
+   [`fixtures/`](fixtures) for the corpus itself — 25 seeded cases across all 15
+   pitfalls: 19 hand-authored, synthetic-`Document` cases reachable through the
+   pure-Rust classify/assemble surface, plus 6 PDF-backed cases for the extraction-layer
+   pitfalls (superscript/subscript, rotated text, embedded/custom-encoded fonts,
+   overlapping text, multi-line table cells, cross-page continuation), each a frozen
+   `extract_baseline` snapshot of a small hand-authored PDF under
+   `crates/pdfspatial-core/tests/fixtures/stage3/`, generated and kept in sync by
+   [`examples/stage3_pdf_cases.rs`](examples/stage3_pdf_cases.rs) and checked for drift
+   by `tests/stage3_pdf_fixtures.rs`. Each case's expected behavior is the desired
+   *post-Stage-4* outcome, so the corpus's behavioral test is `#[ignore]`d and fails
+   today by design for 24 of the 25 cases — the exception, a `multi_column` case with a
+   gutter wide enough for the XY-cut heuristic to recover correct order, quantifies the
+   roadmap's predicted reading-order edit-distance degradation (via
+   `metrics::reading_order_edit_distance`, now surfaced by `eval::corpus::CaseOutcome`)
+   alongside its recovery. See `fixtures/README.md`. The same naive-vs-assembled
+   edit-distance delta now also drives
    real-sample mining: `eval::rank_pages_by_reorder` (and, behind the `doclaynet`
    feature, `eval::doclaynet::mine_reading_order_failures`) ranks a DocLayNet sample's
    pages by how heavily `assemble_reading_order` reordered them — an unsupervised proxy

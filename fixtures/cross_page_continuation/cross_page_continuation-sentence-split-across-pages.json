@@ -1,0 +1,55 @@
+{
+  "id": "cross_page_continuation-sentence-split-across-pages",
+  "source_pdf": "crates/pdfspatial-core/tests/fixtures/stage3/cross_page_continuation.pdf",
+  "pitfall": "cross_page_continuation",
+  "root_cause": "ordering",
+  "description": "A two-page document whose single sentence is split across the page boundary with no heading to signal a restart on page two. `assemble_reading_order` only reorders blocks within a page, so it has no mechanism to notice or stitch a sentence that continues onto the next page.",
+  "pages": [
+    {
+      "width": 612.0,
+      "height": 792.0,
+      "blocks": [
+        {
+          "lines": [
+            {
+              "text": "This sentence deliberately continues on the next",
+              "bbox": [
+                72.0,
+                697.468,
+                328.79993,
+                710.86
+              ],
+              "font_size": 12.0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "width": 612.0,
+      "height": 792.0,
+      "blocks": [
+        {
+          "lines": [
+            {
+              "text": "page without any heading to signal a restart.",
+              "bbox": [
+                72.0,
+                697.468,
+                307.46396,
+                710.86
+              ],
+              "font_size": 12.0
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "reading_order": [
+      "This sentence deliberately continues on the next page without any heading to signal a restart."
+    ],
+    "requires_extraction_fix": true
+  }
+}
