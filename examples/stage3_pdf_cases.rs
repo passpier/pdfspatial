@@ -178,7 +178,7 @@ fn super_subscript_expected() -> ExpectedBehavior {
     ExpectedBehavior {
         reading_order: Some(vec!["x2 + y2 = z2".to_string()]),
         classes: Vec::new(),
-        requires_extraction_fix: true,
+        requires_extraction_fix: false,
     }
 }
 
@@ -251,11 +251,13 @@ fn cases() -> Vec<CaseSpec> {
             root_cause: RootCause::Geometric,
             description: "A short algebraic formula whose exponents are set at 7pt on a \
                 baseline raised ~6pt above the 12pt body characters (real superscript \
-                positioning, not a synthetic already-grouped block). Word grouping keeps \
-                the whole formula on one line, but treats each exponent as its own word \
-                separated by a spurious space ('x 2 + y 2 = z 2') instead of attaching it \
-                directly to its base ('x2 + y2 = z2') -- Stage 1 has no font-size-aware \
-                notion of \"this word is a superscript of the previous one\".",
+                positioning, not a synthetic already-grouped block). Word grouping \
+                recognizes a much-smaller, baseline-offset, still-nearby character as a \
+                super/subscript of its predecessor (`is_script_continuation` in \
+                extract.rs) and attaches it directly to its base ('x2 + y2 = z2') instead \
+                of splitting it off across the wide typographic gap a plain advance-width \
+                threshold would treat as a word break. Green regression guard for the \
+                Stage 4 baseline-clustering fix.",
             font_body: HELVETICA,
             pages: &[(
                 "BT\n/F1 12 Tf\n1 0 0 1 72 700 Tm\n(x) Tj\n\

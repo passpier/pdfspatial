@@ -88,11 +88,11 @@ Every case must live directly under the directory matching its own `pitfall` fie
   hand-authored cases.
 - `expected.requires_extraction_fix` (default `false`): set on a PDF-backed case whose
   `expected` names text the current extractor doesn't produce yet (e.g. a desired
-  `"x2 + y2 = z2"` where extraction today yields `"x 2 + y 2 = z 2"`). It exempts that
-  case from `corpus_is_wellformed`'s normal "every expected string resolves to a real
-  block" check -- but the test still requires a `source_pdf` and at least one entry that
-  genuinely doesn't resolve, so the flag can't be set spuriously. See "PDF-backed cases"
-  below.
+  `"SIDEBAR LABEL"` where extraction today shatters the rotated glyphs into one
+  single-character line each). It exempts that case from `corpus_is_wellformed`'s normal
+  "every expected string resolves to a real block" check -- but the test still requires a
+  `source_pdf` and at least one entry that genuinely doesn't resolve, so the flag can't be
+  set spuriously. See "PDF-backed cases" below.
 
 ### `pitfall` slugs
 
@@ -117,13 +117,18 @@ Every seeded case's `expected` block states what the pipeline *should* do once S
 lands the corresponding fix -- not a snapshot of today's (wrong) output. Running
 `cargo test --features stage3 -- --ignored` executes
 `corpus_cases_meet_expected_behavior`, which is `#[ignore]`d for exactly this reason: it
-currently fails for 24 of the corpus's 25 cases, printing a scoreboard of every mismatch.
-The one exception, `multi_column-wide-gutter-recovers-column-order`
-(`fixtures/multi_column/`), is a *positive contrast* case -- its gutter is wide enough for
-`assemble::MIN_CUT_FRACTION` to fire, so it passes today and is checked unconditionally by
+currently fails for 23 of the corpus's 25 cases, printing a scoreboard of every mismatch.
+Two cases pass today: `multi_column-wide-gutter-recovers-column-order`
+(`fixtures/multi_column/`) is a *positive contrast* case -- its gutter is wide enough for
+`assemble::MIN_CUT_FRACTION` to fire -- and is checked unconditionally by
 `tests/stage3_corpus.rs`'s `multi_column_wide_gutter_recovers_reading_order`, not the
-`#[ignore]`d scoreboard. That failing run *is* the executable Stage 3 error analysis --
-re-run it after any Stage 4 heuristic change to see which cases flip to passing.
+`#[ignore]`d scoreboard; `super_subscript-formula-baseline-clustering`
+(`fixtures/super_subscript/`) is the corpus's first *fixed* case -- Stage 1's
+`extract::group_words` now recognizes a smaller, baseline-offset, nearby character as a
+super/subscript of its predecessor and attaches it to its base instead of splitting it off
+as its own word, so it flows through the ordinary scoreboard and simply passes. That
+failing run *is* the executable Stage 3 error analysis -- re-run it after any Stage 4
+heuristic change to see which cases flip to passing.
 
 For every case with `expected.reading_order`, `CaseOutcome` (from `eval::corpus`) also
 reports `reading_order_edit_distance` (post-`assemble_reading_order`, using
@@ -164,7 +169,7 @@ All 15 `assemble::Pitfall` variants are seeded, 25 cases total:
 
 | Pitfall | Root cause | Why it needs a real PDF |
 |---|---|---|
-| `super_subscript` | `geometric` | A character-extraction/baseline-clustering failure in the real PDFium text layer; a synthetic already-grouped `Document` gives Stage 1's baseline clustering nothing to get wrong. |
+| `super_subscript` | `geometric` | A character-extraction/baseline-clustering failure in the real PDFium text layer; a synthetic already-grouped `Document` gives Stage 1's baseline clustering nothing to get wrong. **Fixed** -- `extract::group_words`'s script-continuation check now attaches a raised/lowered, much-smaller, nearby character to its base word; this is the one PDF-backed case that already passes the scoreboard. |
 | `rotated_text` | `geometric` | Needs real glyph rotation data from PDFium's text layer. |
 | `embedded_font` | `geometric` | Needs a real custom-encoded/CID-keyed font to reproduce dropped/garbled glyphs. |
 | `overlapping_text` | `geometric` | Needs real z-ordered text objects from a PDF. |

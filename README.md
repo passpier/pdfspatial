@@ -53,11 +53,14 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    [`examples/stage3_pdf_cases.rs`](examples/stage3_pdf_cases.rs) and checked for drift
    by `tests/stage3_pdf_fixtures.rs`. Each case's expected behavior is the desired
    *post-Stage-4* outcome, so the corpus's behavioral test is `#[ignore]`d and fails
-   today by design for 24 of the 25 cases — the exception, a `multi_column` case with a
-   gutter wide enough for the XY-cut heuristic to recover correct order, quantifies the
-   roadmap's predicted reading-order edit-distance degradation (via
-   `metrics::reading_order_edit_distance`, now surfaced by `eval::corpus::CaseOutcome`)
-   alongside its recovery. See `fixtures/README.md`. The same naive-vs-assembled
+   today by design for 23 of the 25 cases. Two cases already pass: a `multi_column` case
+   with a gutter wide enough for the XY-cut heuristic to recover correct order (quantifying
+   the roadmap's predicted reading-order edit-distance degradation via
+   `metrics::reading_order_edit_distance`, now surfaced by `eval::corpus::CaseOutcome`,
+   alongside its recovery), and `super_subscript`, the first Stage 4 heuristic fix landed —
+   `extract::group_words` now recognizes a super/subscript by its size, baseline offset,
+   and proximity to the preceding character and attaches it to that character's word
+   instead of splitting it off. See `fixtures/README.md`. The same naive-vs-assembled
    edit-distance delta now also drives
    real-sample mining: `eval::rank_pages_by_reorder` (and, behind the `doclaynet`
    feature, `eval::doclaynet::mine_reading_order_failures`) ranks a DocLayNet sample's

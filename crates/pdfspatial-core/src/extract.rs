@@ -61,6 +61,23 @@ const LINE_Y_TOLERANCE_FACTOR: f32 = 0.45;
 /// the shorter line's height, starts a new block.
 const BLOCK_GAP_FACTOR: f32 = 1.5;
 
+/// A character whose font size is at most this multiple of the previous character's is a
+/// candidate super/subscript rather than a new word. Real body text mixes sizes only at
+/// element boundaries (which carry a space or a large gap anyway), so this stays well
+/// below 1.0 to avoid firing on ordinary size jitter.
+const SCRIPT_SIZE_RATIO: f32 = 0.8;
+
+/// How far a candidate script's box bottom must sit from the previous character's,
+/// expressed as a multiple of the larger font size, before it counts as a raised/lowered
+/// baseline rather than the natural descender difference between two font sizes on the
+/// *same* baseline (which is `descent * size_delta`, well under this).
+const SCRIPT_BASELINE_OFFSET_FACTOR: f32 = 0.15;
+
+/// The largest horizontal gap, as a multiple of the base character's font size, across
+/// which a super/subscript still attaches to its base. Wider than [`WORD_GAP_FACTOR`]
+/// because scripts are positioned typographically rather than by advance width.
+const SCRIPT_GAP_FACTOR: f32 = 0.75;
+
 /// Where to obtain the native PDFium library from.
 ///
 /// `pdfium-render` binds to PDFium at run time rather than linking it statically, so this
@@ -198,6 +215,15 @@ fn extract_page(index: usize, page: &PdfPage) -> Result<Page, PipelineError> {
         .chars()
         .iter()
         .filter_map(|raw| extract_char(&raw))
+        // PDFium inserts synthetic zero-width `\r`/`\n` markers between separate
+        // text-showing operators (e.g. between a base character and a following
+        // superscript/subscript positioned via its own `Tm`), even when both sit on the
+        // same visual line. They carry no ink and are already excluded from every word's
+        // text (whitespace never enters `group_words`'s `current` word buffer), so
+        // dropping them here only removes their side effect of unconditionally forcing a
+        // word break -- it does not change any extracted text and does not count against
+        // `char_recall`, since ground-truth text never contains them either.
+        .filter(|c| !matches!(c.unicode, Some('\r') | Some('\n')))
         .collect();
 
     let blocks = group_chars_into_blocks(&chars);
@@ -273,7 +299,10 @@ fn extract_char(raw: &PdfPageTextChar) -> Option<Char> {
 ///
 /// A word boundary occurs when: the character is whitespace, the horizontal gap since
 /// the previous character exceeds [`WORD_GAP_FACTOR`] times the local font size, or the
-/// previous character sits on a visibly different baseline (a line break mid-stream).
+/// previous character sits on a visibly different baseline (a line break mid-stream) --
+/// unless [`is_script_continuation`] recognizes the pair as a base character followed by
+/// its super/subscript, in which case no break is inserted despite the size/baseline
+/// mismatch.
 fn group_words(chars: &[Char]) -> Vec<Word> {
     let mut words = Vec::new();
     let mut current: Vec<Char> = Vec::new();
@@ -288,7 +317,9 @@ fn group_words(chars: &[Char]) -> Vec<Word> {
             let x_gap = ch.bbox.left - p.bbox.right;
             let same_baseline = ch.bbox.vertically_overlaps(&p.bbox);
 
-            if !same_baseline || x_gap > font_size * WORD_GAP_FACTOR {
+            if !is_script_continuation(p, ch)
+                && (!same_baseline || x_gap > font_size * WORD_GAP_FACTOR)
+            {
                 break_word = true;
             }
         }
@@ -315,6 +346,29 @@ fn finalize_word(chars: Vec<Char>) -> Word {
     let text: String = chars.iter().filter_map(|c| c.unicode).collect();
     let bbox = union_all(chars.iter().map(|c| c.bbox)).unwrap_or(BBox::ZERO);
     Word { text, bbox, chars }
+}
+
+/// True when `ch` reads as a super/subscript of `prev` rather than the start of a new word.
+///
+/// PDF has no markup for this: an exponent is just a smaller glyph placed on a raised
+/// baseline, and the typesetter's positioning leaves a horizontal gap far wider than the
+/// advance-width gap [`WORD_GAP_FACTOR`] calibrates against. Recognizing the relationship
+/// geometrically -- much smaller, baseline-offset, still overlapping, still close -- lets
+/// the script attach to its base ("x2") instead of splitting off as its own word ("x 2").
+fn is_script_continuation(prev: &Char, ch: &Char) -> bool {
+    let base_size = prev.font_size.max(1.0);
+    if ch.font_size > base_size * SCRIPT_SIZE_RATIO {
+        return false;
+    }
+    if !ch.bbox.vertically_overlaps(&prev.bbox) {
+        return false;
+    }
+    let baseline_offset = (ch.bbox.bottom - prev.bbox.bottom).abs();
+    if baseline_offset <= base_size.max(ch.font_size) * SCRIPT_BASELINE_OFFSET_FACTOR {
+        return false;
+    }
+    let x_gap = ch.bbox.left - prev.bbox.right;
+    x_gap <= base_size * SCRIPT_GAP_FACTOR
 }
 
 /// Groups words into lines via baseline (vertical-center) tolerance clustering.
@@ -537,5 +591,66 @@ mod tests {
         let blocks = group_chars_into_blocks(&chars);
 
         assert_eq!(blocks.len(), 2);
+    }
+
+    /// A 7pt exponent raised ~6pt above a 12pt base character (the `super_subscript`
+    /// fixture's real geometry) attaches to its base as one word instead of splitting off
+    /// across the wide typographic gap `WORD_GAP_FACTOR` alone would treat as a break.
+    #[test]
+    fn group_chars_into_blocks_attaches_superscript_to_its_base() {
+        let chars = vec![
+            char_at('x', 72.0, 700.0, 78.0, 712.0, 12.0),
+            char_at('2', 82.0, 706.0, 87.0, 713.0, 7.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].lines.len(), 1);
+        assert_eq!(blocks[0].text(), "x2");
+    }
+
+    /// Same shape as the superscript case, but lowered below the base character's
+    /// baseline instead of raised above it.
+    #[test]
+    fn group_chars_into_blocks_attaches_subscript_to_its_base() {
+        let chars = vec![
+            char_at('H', 72.0, 700.0, 80.0, 712.0, 12.0),
+            char_at('2', 88.0, 694.0, 93.0, 701.0, 7.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks[0].text(), "H2");
+    }
+
+    /// A small, baseline-offset character positioned beyond `SCRIPT_GAP_FACTOR` is too far
+    /// from its candidate base to read as that base's script -- it should stay a separate
+    /// word, guarding the gap gate.
+    #[test]
+    fn group_chars_into_blocks_keeps_distant_small_text_separate() {
+        let chars = vec![
+            char_at('x', 72.0, 700.0, 78.0, 712.0, 12.0),
+            char_at('2', 200.0, 706.0, 205.0, 713.0, 7.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks[0].text(), "x 2");
+    }
+
+    /// A same-size, merely-raised neighbor beyond the ordinary word gap is not a script --
+    /// two body characters of equal size don't relate as base/exponent -- guarding the
+    /// size-ratio gate.
+    #[test]
+    fn group_chars_into_blocks_does_not_attach_same_size_neighbour() {
+        let chars = vec![
+            char_at('x', 72.0, 700.0, 78.0, 712.0, 12.0),
+            char_at('y', 200.0, 700.0, 206.0, 712.0, 12.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks[0].text(), "x y");
     }
 }
