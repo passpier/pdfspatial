@@ -1,0 +1,23 @@
+{
+  "images": [
+    { "id": 2001, "file_name": "page_2001.png", "width": 1025.0, "height": 1025.0 },
+    { "id": 2002, "file_name": "page_2002.png", "width": 1025.0, "height": 1025.0 }
+  ],
+  "categories": [
+    { "id": 1, "name": "Caption" },
+    { "id": 2, "name": "Footnote" },
+    { "id": 3, "name": "Formula" },
+    { "id": 4, "name": "List-item" },
+    { "id": 5, "name": "Page-footer" },
+    { "id": 6, "name": "Page-header" },
+    { "id": 7, "name": "Picture" },
+    { "id": 8, "name": "Section-header" },
+    { "id": 9, "name": "Table" },
+    { "id": 10, "name": "Text" },
+    { "id": 11, "name": "Title" }
+  ],
+  "annotations": [
+    { "id": 1, "image_id": 2001, "category_id": 10, "bbox": [0.0, 0.0, 1025.0, 1025.0] },
+    { "id": 2, "image_id": 2002, "category_id": 10, "bbox": [0.0, 0.0, 1025.0, 1025.0] }
+  ]
+}

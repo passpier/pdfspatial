@@ -1,0 +1,6 @@
+{
+  "cells": [
+    { "text": "LeftCol", "bbox": [40.0, 300.0, 240.0, 12.0], "font_size": 10.0 },
+    { "text": "RightCol", "bbox": [550.0, 300.0, 240.0, 12.0], "font_size": 10.0 }
+  ]
+}

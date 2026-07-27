@@ -1,0 +1,7 @@
+{
+  "cells": [
+    { "text": "Hello", "bbox": [100.0, 900.0, 40.0, 12.0], "font": { "size": 10.0 } },
+    { "text": "world", "bbox": [145.0, 900.0, 40.0, 12.0], "font": { "size": 10.0 } }
+  ],
+  "metadata": { "original_width": 612.0, "original_height": 792.0 }
+}

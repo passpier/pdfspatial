@@ -29,9 +29,15 @@
 //! `document_from_cells`), so this needs no native PDFium. Passing `--pdfium <pdf_dir>`
 //! instead ranks the real Stage 1 extraction (`extract_baseline`) against
 //! `<pdf_dir>/{image_file_stem}.pdf`, closer to the real pipeline but requiring
-//! `PDFSPATIAL_PDFIUM_LIB` to be set.
+//! `PDFSPATIAL_PDFIUM_LIB` to be set. Passing `--grouped` instead of `--pdfium` still
+//! needs no PDFium: it reconstructs each page via `document_from_cells_grouped`, running
+//! Stage 1's real word/line/block grouping over DocLayNet's cells rather than treating
+//! each cell as its own block (see `eval::doclaynet`'s module docs for the trade-off).
+//! `--pdfium` and `--grouped` are mutually exclusive.
 
-use pdfspatial_core::eval::doclaynet::{DocLayNetPage, load_sample, mine_reading_order_failures};
+use pdfspatial_core::eval::doclaynet::{
+    DocLayNetPage, load_sample, mine_reading_order_failures, mine_reading_order_failures_grouped,
+};
 use pdfspatial_core::eval::{PageReorderRank, rank_pages_by_reorder};
 use pdfspatial_core::{PdfiumSource, extract_baseline_with_source};
 use std::path::{Path, PathBuf};
@@ -50,6 +56,7 @@ fn main() -> ExitCode {
 
     let mut positional = Vec::new();
     let mut pdf_dir: Option<PathBuf> = None;
+    let mut grouped = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -62,6 +69,10 @@ fn main() -> ExitCode {
                 pdf_dir = Some(PathBuf::from(value));
                 i += 2;
             }
+            "--grouped" => {
+                grouped = true;
+                i += 1;
+            }
             other => {
                 positional.push(other.to_string());
                 i += 1;
@@ -69,12 +80,17 @@ fn main() -> ExitCode {
         }
     }
 
+    if pdf_dir.is_some() && grouped {
+        eprintln!("--pdfium and --grouped are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
+
     let (coco_json, cells_dir) = match positional.as_slice() {
         [coco, cells] => (PathBuf::from(coco), PathBuf::from(cells)),
         [] => {
             let Some(base) = std::env::var_os("DOCLAYNET_DIR") else {
                 eprintln!(
-                    "usage: doclaynet_mine <coco.json> <cells_dir> [--pdfium <pdf_dir>]\n\
+                    "usage: doclaynet_mine <coco.json> <cells_dir> [--pdfium <pdf_dir>] [--grouped]\n\
                      (or set DOCLAYNET_DIR to default to $DOCLAYNET_DIR/COCO/val.json and $DOCLAYNET_DIR/JSON)"
                 );
                 return ExitCode::FAILURE;
@@ -83,7 +99,9 @@ fn main() -> ExitCode {
             (base.join("COCO/val.json"), base.join("JSON"))
         }
         _ => {
-            eprintln!("usage: doclaynet_mine <coco.json> <cells_dir> [--pdfium <pdf_dir>]");
+            eprintln!(
+                "usage: doclaynet_mine <coco.json> <cells_dir> [--pdfium <pdf_dir>] [--grouped]"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -102,6 +120,14 @@ fn main() -> ExitCode {
     );
 
     let rows: Vec<Row> = match &pdf_dir {
+        None if grouped => mine_reading_order_failures_grouped(&sample)
+            .into_iter()
+            .map(|mined| Row {
+                image_id: mined.image_id,
+                file_name: mined.file_name,
+                rank: mined.rank,
+            })
+            .collect(),
         None => mine_reading_order_failures(&sample)
             .into_iter()
             .map(|mined| Row {

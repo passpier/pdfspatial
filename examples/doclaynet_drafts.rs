@@ -25,11 +25,19 @@
 //! page text-only from `pdf_cells` (no native PDFium needed), minimizes it, and either
 //! writes a draft case or reports why the page was skipped (already ordered, or
 //! duplicate-text blocks destroyed the reordering signal once deduplicated).
+//!
+//! Passing `--grouped` switches the reconstruction (both the ranking and the page each
+//! draft is minimized from) to `document_from_cells_grouped`/
+//! `mine_reading_order_failures_grouped`, which run Stage 1's real word/line/block
+//! grouping over DocLayNet's cells instead of treating each cell as its own block --
+//! see `eval::doclaynet`'s module docs for what that trades off.
 
+use pdfspatial_core::Document;
 use pdfspatial_core::assemble::{Pitfall, RootCause};
 use pdfspatial_core::eval::corpus::{DraftCase, write_draft_case};
 use pdfspatial_core::eval::doclaynet::{
-    document_from_cells, load_sample, mine_reading_order_failures,
+    DocLayNetPage, document_from_cells, document_from_cells_grouped, load_sample,
+    mine_reading_order_failures, mine_reading_order_failures_grouped,
 };
 use pdfspatial_core::eval::minimize_reorder_repro;
 use std::path::PathBuf;
@@ -43,6 +51,7 @@ fn main() -> ExitCode {
     let mut positional = Vec::new();
     let mut out_dir: Option<PathBuf> = None;
     let mut top_n = DEFAULT_TOP_N;
+    let mut grouped = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -69,6 +78,10 @@ fn main() -> ExitCode {
                 }
                 i += 2;
             }
+            "--grouped" => {
+                grouped = true;
+                i += 1;
+            }
             other => {
                 positional.push(other.to_string());
                 i += 1;
@@ -78,7 +91,7 @@ fn main() -> ExitCode {
 
     let Some(out_dir) = out_dir else {
         eprintln!(
-            "usage: doclaynet_drafts <coco.json> <cells_dir> --out <dir> [--top-n N]\n\
+            "usage: doclaynet_drafts <coco.json> <cells_dir> --out <dir> [--top-n N] [--grouped]\n\
              (or set DOCLAYNET_DIR to default the positional args to \
              $DOCLAYNET_DIR/COCO/val.json and $DOCLAYNET_DIR/JSON)"
         );
@@ -90,7 +103,7 @@ fn main() -> ExitCode {
         [] => {
             let Some(base) = std::env::var_os("DOCLAYNET_DIR") else {
                 eprintln!(
-                    "usage: doclaynet_drafts <coco.json> <cells_dir> --out <dir> [--top-n N]\n\
+                    "usage: doclaynet_drafts <coco.json> <cells_dir> --out <dir> [--top-n N] [--grouped]\n\
                      (or set DOCLAYNET_DIR to default to $DOCLAYNET_DIR/COCO/val.json and \
                      $DOCLAYNET_DIR/JSON)"
                 );
@@ -100,7 +113,9 @@ fn main() -> ExitCode {
             (base.join("COCO/val.json"), base.join("JSON"))
         }
         _ => {
-            eprintln!("usage: doclaynet_drafts <coco.json> <cells_dir> --out <dir> [--top-n N]");
+            eprintln!(
+                "usage: doclaynet_drafts <coco.json> <cells_dir> --out <dir> [--top-n N] [--grouped]"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -118,8 +133,17 @@ fn main() -> ExitCode {
         coco_json.display()
     );
 
-    let mined = mine_reading_order_failures(&sample);
+    let mined = if grouped {
+        mine_reading_order_failures_grouped(&sample)
+    } else {
+        mine_reading_order_failures(&sample)
+    };
     let candidates = mined.into_iter().take(top_n);
+    let reconstruct: fn(&DocLayNetPage) -> Document = if grouped {
+        document_from_cells_grouped
+    } else {
+        document_from_cells
+    };
 
     println!(
         "{:<6} {:>10} {:<24} {:>10} {:>10} {:>10}  result",
@@ -135,7 +159,7 @@ fn main() -> ExitCode {
             .iter()
             .find(|p| p.image_id == mined_page.image_id)
             .expect("mined page must come from the loaded sample");
-        let document = document_from_cells(source_page);
+        let document = reconstruct(source_page);
         let page = &document.pages[0];
 
         match minimize_reorder_repro(page) {
@@ -163,13 +187,18 @@ fn main() -> ExitCode {
                 );
                 let description = format!(
                     "DRAFT: mined from DocLayNet image_id {} ({}), ranked #{} by reorder_edit_distance \
-                     ({} block moves on the full page). Pitfall/root_cause below are the mining \
-                     signal's own hypothesis (reordering => multi_column/ordering) -- review and \
-                     re-tag before promoting out of draft.",
+                     ({} block moves on the full page), reconstructed via {}. Pitfall/root_cause below \
+                     are the mining signal's own hypothesis (reordering => multi_column/ordering) -- \
+                     review and re-tag before promoting out of draft.",
                     mined_page.image_id,
                     mined_page.file_name,
                     position + 1,
                     mined_page.rank.reorder_edit_distance,
+                    if grouped {
+                        "document_from_cells_grouped (real Stage 1 grouping)"
+                    } else {
+                        "document_from_cells (one cell per block)"
+                    },
                 );
                 let draft = DraftCase {
                     id: &id,

@@ -62,8 +62,13 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    `eval::corpus::write_draft_case` carry that ranking the rest of the way: shrinking a
    ranked page to the handful of blocks that actually drive the reordering and emitting
    it as an unreviewed **draft** `fixtures/`-schema case (`"draft": true`) for a human to
-   verify, re-tag, and promote. See `examples/doclaynet_drafts.rs` and
-   `fixtures/README.md`'s "Mining drafts from a real sample" section.
+   verify, re-tag, and promote. Both examples accept real DocLayNet-core's on-disk
+   naming/schema unmodified, and an opt-in `--grouped` flag reconstructs pages via Stage
+   1's real word/line/block grouping (`extract::group_chars_into_blocks`,
+   `eval::doclaynet::document_from_cells_grouped`) instead of one-cell-per-block, for more
+   legible drafts at the cost of merging text across column gutters like real Stage 1
+   does. See `examples/doclaynet_drafts.rs` and `fixtures/README.md`'s "Mining drafts from
+   a real sample" section.
 4. **Refinement** (heuristics implemented; fine-tuning stubbed) — [`layout.rs`](crates/pdfspatial-core/src/layout.rs)
    classifies regions with deterministic text-layer heuristics (Title, SectionHeader,
    ListItem, Caption, PageHeader/Footer, Text — `Table`/`Picture`/`Formula` need the
@@ -159,11 +164,15 @@ mining the top-N ranked pages into minimal, reviewable draft `fixtures/`-schema 
 
 ```sh
 cargo run --example doclaynet_drafts --features doclaynet,stage3 -- \
-  <coco.json> <cells_dir> --out <dir> [--top-n 5]
+  <coco.json> <cells_dir> --out <dir> [--top-n 5] [--grouped]
 ```
 
-See `fixtures/README.md`'s "Mining drafts from a real sample" section for the review
-checklist before promoting a draft into the real corpus.
+Both examples accept a real, unpacked DocLayNet-core tree's naming and cell schema
+directly (no renaming needed), and `--grouped` switches page reconstruction to Stage 1's
+real word/line/block grouping instead of one-cell-per-block. See `fixtures/README.md`'s
+"Getting a real DocLayNet-core sample" and "Mining drafts from a real sample" sections
+for setup, the `--grouped` trade-off, and the review checklist before promoting a draft
+into the real corpus.
 
 ### Running benchmarks
 

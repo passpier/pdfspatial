@@ -22,17 +22,37 @@
 //! (PDF-point space) must first rescale the ground truth by `pdf_height / coco_height`
 //! before flipping — this loader does not do that for you.
 //!
+//! Real DocLayNet-core `pdf_cells` files carry font metrics under a nested `font.size`
+//! rather than a flat `font_size`, and separately track the original PDF page's point
+//! dimensions in a `metadata` object. [`load_sample`] reads both, and computes
+//! [`DocLayNetPage::coco_scale`] from the latter for [`document_from_cells_grouped`] to
+//! use (see "Prediction granularity" below).
+//!
 //! # Prediction granularity
 //!
-//! [`document_from_cells`] reconstructs a [`crate::Document`] with **one `pdf_cells`
-//! cell per [`crate::Line`] per [`crate::Block`]** — it does not attempt Stage 1's
-//! word/line/block grouping (which today lives entangled with PDFium calls in
-//! [`crate::extract`]). This under-groups relative to a real extraction (DocLayNet
-//! cells are typically word- or short-phrase-sized), so predictions from
-//! [`predict_regions_textonly`] will honestly score lower than the real pipeline would.
-//! Factoring Stage 1's pure geometric grouping out of [`crate::extract`] into a
-//! PDFium-free helper this loader could call is tracked as follow-up work.
+//! Two reconstructions turn a [`DocLayNetPage`]'s cells into a [`crate::Document`],
+//! trading off legibility against under/over-grouping:
+//!
+//! - [`document_from_cells`] maps **one `pdf_cells` cell per [`crate::Line`] per
+//!   [`crate::Block`]**, skipping Stage 1's word/line/block grouping entirely. DocLayNet
+//!   cells are typically word- or short-phrase-sized, so this under-groups relative to a
+//!   real extraction — predictions from [`predict_regions_textonly`] (which always uses
+//!   this path) honestly score lower than the real pipeline would, and drafts mined via
+//!   [`mine_reading_order_failures`] are piles of word-blocks needing heavy editing to
+//!   review. This remains the default because it makes no assumption about DocLayNet's
+//!   authored cell order being reading-order-adjacent.
+//! - [`document_from_cells_grouped`] instead runs the cells through Stage 1's real char →
+//!   word → line → block grouping ([`crate::extract::group_chars_into_blocks`]), the
+//!   same pure geometry [`crate::extract_baseline`] applies to PDFium's text layer. This
+//!   produces realistically-sized blocks, but it also means multi-column pages get their
+//!   columns merged line-by-line exactly as real Stage 1 does — which can *reduce* the
+//!   reordering signal [`mine_reading_order_failures_grouped`] ranks pages by, since a
+//!   merged line can no longer itself be reordered. Use this path (and
+//!   `--grouped` on `examples/doclaynet_mine.rs`/`examples/doclaynet_drafts.rs`) to
+//!   compare against the default on a real sample before deciding which one to mine
+//!   with.
 
+use crate::extract::group_chars_into_blocks;
 use crate::layout::{Region, RegionClass, classify_regions};
 use crate::{BBox, Block, Char, Document, Line, Page, Word};
 use std::collections::HashMap;
@@ -70,9 +90,15 @@ pub enum EvalError {
     /// A COCO annotation referenced a `category_id` not in DocLayNet's 11-class schema.
     #[error("unknown DocLayNet category id {0}")]
     UnknownCategory(i64),
-    /// An image listed in the COCO JSON has no corresponding `pdf_cells` file.
-    #[error("no pdf_cells file for image {0:?}")]
-    MissingCells(String),
+    /// An image listed in the COCO JSON has no corresponding `pdf_cells` file under
+    /// either of the naming conventions [`load_sample`] tries.
+    #[error("no pdf_cells file for image {file_name:?}; tried {tried:?}")]
+    MissingCells {
+        /// The image's `file_name`, per the COCO JSON.
+        file_name: String,
+        /// Every candidate path [`load_sample`] checked before giving up.
+        tried: Vec<std::path::PathBuf>,
+    },
 }
 
 /// A loaded DocLayNet sample: every page's ground truth and reconstructable text
@@ -104,6 +130,15 @@ pub struct DocLayNetPage {
     pub ground_truth: Vec<Region>,
     /// PDF text cells for this page, converted from its `pdf_cells` file.
     pub cells: Vec<PdfCell>,
+    /// Ratio of the COCO image frame's height to the original PDF page's height in
+    /// points (`coco_height / original_height`), if the page's `pdf_cells` file carried
+    /// enough `metadata` to compute it; `1.0` otherwise. [`document_from_cells_grouped`]
+    /// uses this to convert [`PdfCell::font_size`] into the COCO pixel frame before
+    /// running Stage 1's real, font-size-relative grouping thresholds on cell
+    /// geometry that is itself already in that frame -- see the [module
+    /// docs](self#coordinate-frame). [`document_from_cells`] ignores it, so the
+    /// default (one-cell-per-block) reconstruction is unaffected.
+    pub coco_scale: f32,
 }
 
 /// One PDF text cell from DocLayNet's `pdf_cells` annotation, converted into this
@@ -153,6 +188,20 @@ struct CocoAnnotation {
 #[derive(serde::Deserialize)]
 struct PdfCellsPage {
     cells: Vec<PdfCellRaw>,
+    /// Present on real DocLayNet-core page JSON (absent from the flat
+    /// `{stem}.cells.json` shape this crate's own vendored fixtures use); carries the
+    /// original PDF page dimensions alongside the COCO frame's, letting [`load_sample`]
+    /// compute [`DocLayNetPage::coco_scale`]. See the [module docs](self#coordinate-frame).
+    #[serde(default)]
+    metadata: Option<PdfCellsMetadataRaw>,
+}
+
+#[derive(serde::Deserialize)]
+struct PdfCellsMetadataRaw {
+    #[serde(default)]
+    original_width: Option<f32>,
+    #[serde(default)]
+    original_height: Option<f32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -161,6 +210,16 @@ struct PdfCellRaw {
     bbox: [f32; 4],
     #[serde(default)]
     font_size: Option<f32>,
+    /// Real DocLayNet-core cells nest font metrics under this object rather than a flat
+    /// `font_size` field; [`load_sample`] falls back to it when `font_size` is absent.
+    #[serde(default)]
+    font: Option<PdfCellFontRaw>,
+}
+
+#[derive(serde::Deserialize)]
+struct PdfCellFontRaw {
+    #[serde(default)]
+    size: Option<f32>,
 }
 
 // --- Conversions ----------------------------------------------------------------
@@ -249,19 +308,24 @@ fn category_name_to_class(name: &str) -> Option<RegionClass> {
 /// Loads a DocLayNet sample from a COCO JSON file and a directory of per-page
 /// `pdf_cells` JSON files.
 ///
-/// `cells_dir` is expected to contain one file per image named
-/// `{file_stem}.cells.json`, where `file_stem` is `coco_json`'s `images[].file_name`
-/// with its extension removed (e.g. image `page_0001.png` → cells file
-/// `page_0001.cells.json`). This matches the vendored test fixture in
-/// `tests/fixtures/doclaynet/`; a real unpacked DocLayNet-core tree's `JSON/` directory
-/// may need renaming/symlinking to match, or a caller can pre-process it once.
+/// `cells_dir` is expected to contain one file per image named either
+/// `{file_stem}.cells.json` (the vendored test fixtures' naming, under
+/// `tests/fixtures/doclaynet/`) or `{file_stem}.json` (a real unpacked DocLayNet-core
+/// `JSON/` directory's own naming), where `file_stem` is `coco_json`'s
+/// `images[].file_name` with its extension removed (e.g. image `page_0001.png` → cells
+/// file `page_0001.cells.json` or `page_0001.json`). Both are tried, in that order, so a
+/// real download needs no renaming.
+///
+/// Each cell's font size is read from a flat `font_size` field if present, else a
+/// nested `font.size` object (real DocLayNet-core's shape); either missing falls back to
+/// [`DEFAULT_FONT_SIZE`].
 ///
 /// # Errors
 ///
 /// Returns [`EvalError::Io`]/[`EvalError::Json`] if either file can't be read or
 /// parsed, [`EvalError::UnknownCategory`] if an annotation's `category_id` isn't one of
 /// DocLayNet's 11 known ids/names, or [`EvalError::MissingCells`] if an image has no
-/// corresponding cells file.
+/// cells file under either naming convention.
 pub fn load_sample(coco_json: &Path, cells_dir: &Path) -> Result<DocLayNetSample, EvalError> {
     let coco = read_json::<CocoDataset>(coco_json)?;
 
@@ -306,18 +370,37 @@ pub fn load_sample(coco_json: &Path, cells_dir: &Path) -> Result<DocLayNetSample
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(&image.file_name);
-        let cells_path = cells_dir.join(format!("{stem}.cells.json"));
-        if !cells_path.exists() {
-            return Err(EvalError::MissingCells(image.file_name.clone()));
-        }
-        let cells_raw = read_json::<PdfCellsPage>(&cells_path)?;
+        let candidates = [
+            cells_dir.join(format!("{stem}.cells.json")),
+            cells_dir.join(format!("{stem}.json")),
+        ];
+        let Some(cells_path) = candidates.iter().find(|p| p.exists()) else {
+            return Err(EvalError::MissingCells {
+                file_name: image.file_name.clone(),
+                tried: candidates.to_vec(),
+            });
+        };
+        let cells_raw = read_json::<PdfCellsPage>(cells_path)?;
+
+        let coco_scale = cells_raw
+            .metadata
+            .as_ref()
+            .and_then(|m| Some((m.original_width?, m.original_height?)))
+            .filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0)
+            .map(|(_, original_height)| image.height / original_height)
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .unwrap_or(1.0);
+
         let cells = cells_raw
             .cells
             .into_iter()
             .map(|c| PdfCell {
                 text: c.text,
                 bbox: coco_bbox_to_bbox(c.bbox, image.height),
-                font_size: c.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+                font_size: c
+                    .font_size
+                    .or(c.font.and_then(|f| f.size))
+                    .unwrap_or(DEFAULT_FONT_SIZE),
             })
             .collect();
 
@@ -328,6 +411,7 @@ pub fn load_sample(coco_json: &Path, cells_dir: &Path) -> Result<DocLayNetSample
             height: image.height,
             ground_truth,
             cells,
+            coco_scale,
         });
     }
 
@@ -394,6 +478,50 @@ pub fn document_from_cells(page: &DocLayNetPage) -> Document {
     }
 }
 
+/// Reconstructs a single-page [`Document`] from a [`DocLayNetPage`]'s PDF text cells,
+/// running Stage 1's real char → word → line → block grouping
+/// ([`crate::extract::group_chars_into_blocks`]) instead of [`document_from_cells`]'s
+/// one-cell-per-block mapping.
+///
+/// Cells are concatenated in the order `page.cells` lists them (the same order
+/// [`document_from_cells`] preserves), each cell's characters carrying its bbox and its
+/// font size scaled into the COCO pixel frame via [`DocLayNetPage::coco_scale`] --
+/// grouping's thresholds are expressed as multiples of font size, so this keeps them
+/// comparable to bbox geometry that is itself already in that frame.
+///
+/// See the [module docs](self#prediction-granularity) for the trade-off against
+/// [`document_from_cells`]: real grouping merges same-baseline text across column
+/// gutters exactly as Stage 1's PDFium-backed path does, which is more honest but can
+/// erase the reordering signal [`mine_reading_order_failures_grouped`] looks for on some
+/// pages.
+pub fn document_from_cells_grouped(page: &DocLayNetPage) -> Document {
+    let chars: Vec<Char> = page
+        .cells
+        .iter()
+        .filter(|cell| !cell.text.trim().is_empty())
+        .flat_map(|cell| {
+            let font_size = cell.font_size * page.coco_scale;
+            cell.text.chars().map(move |ch| Char {
+                unicode: Some(ch),
+                bbox: cell.bbox,
+                font_name: "DocLayNet".to_string(),
+                font_size,
+            })
+        })
+        .collect();
+
+    let blocks = group_chars_into_blocks(&chars);
+
+    Document {
+        pages: vec![Page {
+            index: 0,
+            width: page.width,
+            height: page.height,
+            blocks,
+        }],
+    }
+}
+
 /// Runs [`crate::layout::classify_regions`] on the [`Document`] reconstructed by
 /// [`document_from_cells`], producing the text-only predictions [`evaluate_sample`]
 /// scores against `page.ground_truth`.
@@ -439,11 +567,30 @@ pub struct MinedPage {
 /// `--pdfium` mode) -- this function's text-only path exists so mining stays runnable
 /// with nothing but a DocLayNet download.
 pub fn mine_reading_order_failures(sample: &DocLayNetSample) -> Vec<MinedPage> {
+    mine_reading_order_failures_with(sample, document_from_cells)
+}
+
+/// Like [`mine_reading_order_failures`], but reconstructing each page via
+/// [`document_from_cells_grouped`]'s real Stage 1 grouping instead of
+/// [`document_from_cells`]'s one-cell-per-block mapping. See
+/// [`document_from_cells_grouped`]'s docs for the trade-off this implies for the
+/// reordering-severity signal itself.
+pub fn mine_reading_order_failures_grouped(sample: &DocLayNetSample) -> Vec<MinedPage> {
+    mine_reading_order_failures_with(sample, document_from_cells_grouped)
+}
+
+/// Shared body of [`mine_reading_order_failures`] and
+/// [`mine_reading_order_failures_grouped`], parameterized by which reconstruction to
+/// rank so the two entry points can't drift apart.
+fn mine_reading_order_failures_with(
+    sample: &DocLayNetSample,
+    reconstruct: impl Fn(&DocLayNetPage) -> Document,
+) -> Vec<MinedPage> {
     let mut mined: Vec<MinedPage> = sample
         .pages
         .iter()
         .map(|page| {
-            let document = document_from_cells(page);
+            let document = reconstruct(page);
             // Each DocLayNet page reconstructs to a single-page `Document`, so there is
             // exactly one rank to pull out.
             let rank = rank_pages_by_reorder(&document)
@@ -552,6 +699,7 @@ mod tests {
                     font_size: 10.0,
                 },
             ],
+            coco_scale: 1.0,
         };
 
         let document = document_from_cells(&page);
@@ -591,6 +739,7 @@ mod tests {
                 cell("Right two", 320.0, 640.0, 560.0, 690.0),
                 cell("Left two", 40.0, 640.0, 280.0, 690.0),
             ],
+            coco_scale: 1.0,
         };
         let single_column = DocLayNetPage {
             image_id: 1,
@@ -602,6 +751,7 @@ mod tests {
                 cell("First", 40.0, 700.0, 560.0, 750.0),
                 cell("Second", 40.0, 600.0, 560.0, 650.0),
             ],
+            coco_scale: 1.0,
         };
 
         let sample = DocLayNetSample {

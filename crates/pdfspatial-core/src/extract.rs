@@ -200,9 +200,7 @@ fn extract_page(index: usize, page: &PdfPage) -> Result<Page, PipelineError> {
         .filter_map(|raw| extract_char(&raw))
         .collect();
 
-    let words = group_words(&chars);
-    let lines = group_lines(words);
-    let blocks = group_blocks(lines);
+    let blocks = group_chars_into_blocks(&chars);
 
     Ok(Page {
         index,
@@ -210,6 +208,41 @@ fn extract_page(index: usize, page: &PdfPage) -> Result<Page, PipelineError> {
         height,
         blocks,
     })
+}
+
+/// Runs Stage 1's char → word → line → block grouping over an already-extracted
+/// character sequence, with no PDFium involvement.
+///
+/// This is the same geometric grouping [`extract_baseline`] applies to PDFium's native
+/// text layer, factored out as a pure function so callers that reconstruct characters
+/// from another source (for example, a dataset's own text cells) can run the real Stage
+/// 1 grouping instead of approximating it. See
+/// [`crate::eval::doclaynet::document_from_cells_grouped`] for such a caller.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::{BBox, Char};
+/// use pdfspatial_core::extract::group_chars_into_blocks;
+///
+/// let make_char = |ch: char, left: f32, right: f32| Char {
+///     unicode: Some(ch),
+///     bbox: BBox { left, bottom: 0.0, right, top: 10.0 },
+///     font_name: "Test".to_string(),
+///     font_size: 10.0,
+/// };
+///
+/// // "Hi" as two characters on one baseline.
+/// let chars = vec![make_char('H', 0.0, 6.0), make_char('i', 6.0, 9.0)];
+/// let blocks = group_chars_into_blocks(&chars);
+///
+/// assert_eq!(blocks.len(), 1);
+/// assert_eq!(blocks[0].text(), "Hi");
+/// ```
+pub fn group_chars_into_blocks(chars: &[Char]) -> Vec<Block> {
+    let words = group_words(chars);
+    let lines = group_lines(words);
+    group_blocks(lines)
 }
 
 /// Converts a single PDFium character into our owned [`Char`] type.
@@ -452,4 +485,57 @@ fn render_page(
         height: bitmap.height(),
         pixels: bitmap.as_rgba_bytes(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn char_at(ch: char, left: f32, bottom: f32, right: f32, top: f32, font_size: f32) -> Char {
+        Char {
+            unicode: Some(ch),
+            bbox: BBox {
+                left,
+                bottom,
+                right,
+                top,
+            },
+            font_name: "Test".to_string(),
+            font_size,
+        }
+    }
+
+    /// `group_chars_into_blocks` needs no PDFium at all — it operates purely on already
+    /// -extracted [`Char`]s — so this exercises Stage 1's real grouping without the
+    /// native library `tests/stage1_baseline.rs` requires.
+    #[test]
+    fn group_chars_into_blocks_groups_one_line_into_one_block() {
+        // "Hi" on one baseline, no gaps large enough to break word/line/block grouping.
+        let chars = vec![
+            char_at('H', 0.0, 0.0, 6.0, 10.0, 10.0),
+            char_at('i', 6.0, 0.0, 9.0, 10.0, 10.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].lines.len(), 1);
+        assert_eq!(blocks[0].text(), "Hi");
+    }
+
+    /// A vertical gap larger than `BLOCK_GAP_FACTOR` times line height starts a new
+    /// block, even though both lines individually group cleanly. Characters are given
+    /// in top-to-bottom reading order (matching the order PDFium's content stream and
+    /// `document_from_cells_grouped` both feed this function), so `B` sits below `A`.
+    #[test]
+    fn group_chars_into_blocks_splits_on_large_vertical_gap() {
+        let chars = vec![
+            char_at('A', 0.0, 100.0, 6.0, 110.0, 10.0),
+            char_at('B', 0.0, 0.0, 6.0, 10.0, 10.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks.len(), 2);
+    }
 }

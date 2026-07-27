@@ -77,6 +77,7 @@ fn sample_with_a_reordering_page() -> DocLayNetSample {
             cell("Noise A", 40.0, 500.0, 560.0, 550.0),
             cell("Noise B", 40.0, 400.0, 560.0, 450.0),
         ],
+        coco_scale: 1.0,
     });
     sample
 }

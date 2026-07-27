@@ -159,6 +159,25 @@ real-data DocLayNet mining pass (once PDFium and a DocLayNet sample are availabl
 this environment); this corpus establishes the format, harness, and a 2-case-per-pitfall
 seed for the reachable subset.
 
+## Getting a real DocLayNet-core sample
+
+The mining commands below need an unpacked
+[DocLayNet-core](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1) download
+(COCO annotations + per-page `pdf_cells` JSON; DocLayNet-core ships no source PDFs, so
+`doclaynet_mine`'s `--pdfium` mode isn't reachable against it). Point `DOCLAYNET_DIR` at
+the unpacked root:
+
+```
+$DOCLAYNET_DIR/
+├── COCO/{train,val,test}.json
+└── JSON/<page_hash>.json      # pdf_cells, one file per page
+```
+
+`load_sample` accepts this layout unmodified: it tries `{stem}.cells.json` (the vendored
+test fixtures' own naming) and falls back to `{stem}.json` (real DocLayNet-core's
+naming), and reads font metrics from either a flat `font_size` field or a nested
+`font.size` object. No renaming or pre-processing needed.
+
 ## Mining drafts from a real sample
 
 `eval::rank_pages_by_reorder` / `eval::doclaynet::mine_reading_order_failures` rank a
@@ -170,27 +189,47 @@ turning a page's worth of `pdf_cells` into the handful of blocks that actually d
 reordering), and writes each result as a **draft** case via `eval::corpus::write_draft_case`:
 
 ```sh
-cargo run --example doclaynet_drafts --features doclaynet,stage3 -- \
-  <coco.json> <cells_dir> --out <dir> [--top-n 5]
+# Rank first, to see what's worth mining:
+export DOCLAYNET_DIR=/path/to/DocLayNet-core
+cargo run --example doclaynet_mine --features doclaynet
 
-# or, with DOCLAYNET_DIR set, positional args default to
-# $DOCLAYNET_DIR/COCO/val.json and $DOCLAYNET_DIR/JSON:
-cargo run --example doclaynet_drafts --features doclaynet,stage3 -- --out <dir>
+# Then mine the top pages into drafts (positional args default the same way):
+cargo run --example doclaynet_drafts --features doclaynet,stage3 -- --out <dir> [--top-n 5]
 ```
 
-`--out` is required and is never `fixtures/` itself -- a draft is unreviewed output, not
-a regression case yet. A draft carries `"draft": true` and an `expected.reading_order`
-that is a **snapshot of `assemble_reading_order`'s current output**, not a desired
-post-fix order like every hand-authored case above. That's why `draft` cases are excluded
-from `corpus_covers_seeded_pitfalls` and the `corpus_cases_meet_expected_behavior`
-scoreboard (`tests/stage3_corpus.rs`) -- they'd otherwise pass trivially and mask real
-regressions -- though `corpus_is_wellformed` still checks their shape.
+Both examples also accept an explicit `<coco.json> <cells_dir>` pair instead of
+`DOCLAYNET_DIR`. `--out` is required on `doclaynet_drafts` and is never `fixtures/`
+itself -- a draft is unreviewed output, not a regression case yet. A draft carries
+`"draft": true` and an `expected.reading_order` that is a **snapshot of
+`assemble_reading_order`'s current output**, not a desired post-fix order like every
+hand-authored case above. That's why `draft` cases are excluded from
+`corpus_covers_seeded_pitfalls` and the `corpus_cases_meet_expected_behavior` scoreboard
+(`tests/stage3_corpus.rs`) -- they'd otherwise pass trivially and mask real regressions --
+though `corpus_is_wellformed` still checks their shape.
+
+### `--grouped`: two ways to reconstruct a page from `pdf_cells`
+
+By default, both examples map **one `pdf_cells` cell to one block** (`document_from_cells`)
+-- DocLayNet cells are word- or phrase-sized, so a draft mined this way is a pile of
+word-blocks needing heavy editing before it reads as a real repro. Passing `--grouped`
+switches to `document_from_cells_grouped`, which runs the cells through Stage 1's real
+char → word → line → block grouping (`extract::group_chars_into_blocks`) instead --
+producing realistically-sized blocks, at the cost of merging same-baseline text across
+column gutters exactly as real Stage 1 does (which can *reduce* the reordering signal on
+some pages; see `eval::doclaynet`'s module docs for the full trade-off). Run both and
+compare before deciding which to mine with:
+
+```sh
+cargo run --example doclaynet_mine --features doclaynet -- --grouped
+cargo run --example doclaynet_drafts --features doclaynet,stage3 -- --out <dir> --grouped
+```
 
 Promoting a draft into the real corpus is a manual review step:
 
 1. Open the draft JSON and confirm it's actually a minimal, legible repro of a real
-   reordering failure (not an artifact of `document_from_cells`'s one-cell-per-block
-   under-grouping -- see `eval::doclaynet`'s module docs).
+   reordering failure. If it was mined without `--grouped`, watch for artifacts of
+   `document_from_cells`'s one-cell-per-block under-grouping -- see `eval::doclaynet`'s
+   module docs.
 2. Re-tag `pitfall`/`root_cause` -- the mining pipeline always guesses `multi_column`/
    `ordering` (its own hypothesis, since that's what the ranking signal measures), which
    may not be the actual failure mode.
