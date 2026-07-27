@@ -57,6 +57,13 @@ const WORD_GAP_FACTOR: f32 = 0.28;
 /// the larger of the two font sizes, are placed on different lines.
 const LINE_Y_TOLERANCE_FACTOR: f32 = 0.45;
 
+/// Two characters whose box bottoms differ by more than this, expressed as a multiple of
+/// the larger font size, sit on different baselines and cannot belong to the same word.
+/// Compared against box *bottoms* rather than box overlap because `extract_char` uses
+/// PDFium's loose bounds, whose height varies with the font's ascent/descent (and with
+/// font substitution across PDFium builds) and can exceed the line leading.
+const WORD_BASELINE_TOLERANCE_FACTOR: f32 = 0.2;
+
 /// A vertical gap between consecutive lines larger than this, expressed as a multiple of
 /// the shorter line's height, starts a new block.
 const BLOCK_GAP_FACTOR: f32 = 1.5;
@@ -315,7 +322,8 @@ fn group_words(chars: &[Char]) -> Vec<Word> {
         if let Some(p) = prev {
             let font_size = ch.font_size.max(p.font_size).max(1.0);
             let x_gap = ch.bbox.left - p.bbox.right;
-            let same_baseline = ch.bbox.vertically_overlaps(&p.bbox);
+            let same_baseline = (ch.bbox.bottom - p.bbox.bottom).abs()
+                <= font_size * WORD_BASELINE_TOLERANCE_FACTOR;
 
             if !is_script_continuation(p, ch)
                 && (!same_baseline || x_gap > font_size * WORD_GAP_FACTOR)
