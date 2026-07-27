@@ -26,12 +26,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Download prebuilt PDFium (bblanchon/pdfium-binaries)
-        run: |
-          mkdir -p /home/runner/pdfium
-          curl -sL "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz" \
-            -o /tmp/pdfium.tgz
-          tar -xzf /tmp/pdfium.tgz -C /home/runner/pdfium
-          ls -la /home/runner/pdfium/lib
+        run: ./scripts/fetch-pdfium.sh --dest "$HOME/pdfium"
 
       - name: cargo test --all-features
         run: cargo test --workspace --all-features

@@ -97,9 +97,22 @@ characterizing that failure surface is Stage 3's job.
 ### Prerequisites
 
 `pdfium-render` binds to the native PDFium library at run time; it is not bundled with
-this crate. Download a prebuilt binary for your platform from
-[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries/releases), then
-either:
+this crate. Quickest path (macOS/Linux):
+
+```sh
+./scripts/fetch-pdfium.sh --write-cargo-config
+cargo test --all-features
+```
+
+This downloads a pinned release from
+[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries/releases) into a
+gitignored `third_party/pdfium/`, and `--write-cargo-config` writes a gitignored
+`.cargo/config.toml` that sets `PDFSPATIAL_PDFIUM_LIB` for every `cargo` invocation in this
+workspace — no shell export needed. Re-run the script any time; it's a no-op if the library
+is already present (`--force` to re-download).
+
+To set it up manually instead, download a prebuilt binary for your platform from the same
+releases page, then either:
 
 - place it somewhere on your system's standard dynamic-library search path
   (`DYLD_LIBRARY_PATH` on macOS, `LD_LIBRARY_PATH` on Linux, `PATH` on Windows), or
@@ -124,6 +137,13 @@ PDFSPATIAL_PDFIUM_LIB=/path/to/libpdfium.dylib \
 ```
 
 ### Running tests
+
+```sh
+cargo test --all-features
+```
+
+This works with no environment variable once `scripts/fetch-pdfium.sh --write-cargo-config`
+has been run (see Prerequisites above); otherwise set `PDFSPATIAL_PDFIUM_LIB` explicitly:
 
 ```sh
 PDFSPATIAL_PDFIUM_LIB=/path/to/libpdfium.dylib cargo test --all-features
@@ -192,6 +212,7 @@ pdfspatial/
 │                             # serialize, metrics
 ├── benches/                  # Criterion benches for Stage 2 validation
 ├── fixtures/                 # Stage 3 minimal-repro regression corpus (seeded)
+├── scripts/fetch-pdfium.sh   # downloads/wires up the native PDFium library
 ├── examples/basic_extract.rs
 └── .github/workflows/ci.yml
 ```

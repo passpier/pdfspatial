@@ -35,7 +35,10 @@ serialization) grounded in spatial (bounding-box) extraction rather than layout 
 - `cargo test --all-features` (matches CI) — also runs `tests/stage1_baseline.rs`, which
   **requires** a native PDFium library: set `PDFSPATIAL_PDFIUM_LIB` to the lib file/dir, or place
   it on the OS dynamic-loader path (`DYLD_LIBRARY_PATH` on macOS). `pdfium-render` does not bundle
-  this library.
+  this library. `scripts/fetch-pdfium.sh --write-cargo-config` downloads a pinned release and
+  writes a gitignored `.cargo/config.toml` so this works with no shell export; CI's PDFium
+  download step calls the same script. `scripts/` follows the same workspace-root convention as
+  `benches/`/`examples/` (see below), not the crate's own layout.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` and
   `cargo fmt --all -- --check` — both enforced in CI; no custom `rustfmt.toml`/`clippy.toml`, so
   defaults apply. `lib.rs` also sets `#![warn(missing_docs)]` and `#![warn(clippy::all)]`.
