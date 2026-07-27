@@ -75,6 +75,16 @@ pub enum CorpusError {
     /// unambiguously identify a single block.
     #[error("duplicate block text {0:?} makes block references ambiguous")]
     DuplicateBlockText(String),
+    /// Failed to serialize a [`DraftCase`] to JSON.
+    #[error("JSON serialization error: {0}")]
+    Serialize(#[source] serde_json::Error),
+    /// [`write_draft_case`] was asked to write a case whose target path already
+    /// exists; drafts are never silently overwritten.
+    #[error("draft case already exists at {path}")]
+    DraftExists {
+        /// The path that already existed.
+        path: PathBuf,
+    },
 }
 
 /// A single Stage 3 regression case: a minimal-repro [`Document`] tagged with the
@@ -98,6 +108,14 @@ pub struct RegressionCase {
     pub expected: ExpectedBehavior,
     /// The file this case was loaded from, kept for diagnostics.
     pub source_path: PathBuf,
+    /// `true` if this case was auto-mined by [`write_draft_case`] and not yet
+    /// human-reviewed. A draft's `expected` is a snapshot of the pipeline's *current*
+    /// behavior (from [`assemble_reading_order`] at mining time), not desired post-fix
+    /// behavior -- the opposite of every hand-authored case's convention (see the
+    /// [module docs](self)). Consumers that treat `expected` as a desired-behavior
+    /// assertion (e.g. `corpus_cases_meet_expected_behavior`,
+    /// `corpus_covers_seeded_pitfalls`) must exclude draft cases.
+    pub draft: bool,
 }
 
 /// The desired post-fix behavior a [`RegressionCase`] checks for.
@@ -149,17 +167,24 @@ pub struct CaseOutcome {
 
 // --- On-disk schema (private; the corpus's own JSON authoring format) -----------
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct CaseFile {
     id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    draft: bool,
     pitfall: String,
     root_cause: String,
     description: String,
     page: PageFile,
+    #[serde(default, skip_serializing_if = "is_default_expected")]
     expected: ExpectedFile,
 }
 
-#[derive(serde::Deserialize)]
+fn is_default_expected(expected: &ExpectedFile) -> bool {
+    expected.reading_order.is_none() && expected.classes.is_empty()
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
 struct PageFile {
     width: f32,
     height: f32,
@@ -170,12 +195,12 @@ struct PageFile {
 /// `Block::lines().len()` directly -- several pitfalls (running headers/footers,
 /// multi-line table cells, fragmented formulas) hinge on line count, which a
 /// single-line-per-block shape can't vary.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct BlockFile {
     lines: Vec<LineFile>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct LineFile {
     text: String,
     /// `[left, bottom, right, top]`, already in the crate's own bottom-left-origin
@@ -190,15 +215,15 @@ fn default_font_size() -> f32 {
     10.0
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Default)]
 struct ExpectedFile {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reading_order: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     classes: Vec<ExpectedClassFile>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct ExpectedClassFile {
     block_text: String,
     class: String,
@@ -257,6 +282,17 @@ fn root_cause_from_slug(slug: &str) -> Result<RootCause, CorpusError> {
         "ordering" => RootCause::Ordering,
         other => return Err(CorpusError::UnknownRootCause(other.to_string())),
     })
+}
+
+/// The canonical slug for a [`RootCause`], the inverse of [`root_cause_from_slug`].
+/// Used by [`draft_case_json`] to render a [`DraftCase`]'s tag back into the on-disk
+/// schema.
+fn root_cause_slug(root_cause: RootCause) -> &'static str {
+    match root_cause {
+        RootCause::Geometric => "geometric",
+        RootCause::Classification => "classification",
+        RootCause::Ordering => "ordering",
+    }
 }
 
 fn class_from_slug(slug: &str) -> Result<RegionClass, CorpusError> {
@@ -332,6 +368,7 @@ pub fn load_case(path: &Path) -> Result<RegressionCase, CorpusError> {
             classes,
         },
         source_path: path.to_path_buf(),
+        draft: case_file.draft,
     })
 }
 
@@ -515,6 +552,126 @@ pub fn evaluate_case(case: &RegressionCase) -> CaseOutcome {
     }
 }
 
+// --- Draft emission (mining pipeline) ----------------------------------------------
+
+/// The inputs needed to render an auto-mined page as a draft corpus case, consumed by
+/// [`draft_case_json`]/[`write_draft_case`].
+///
+/// A draft's `expected.reading_order` is filled in automatically from
+/// [`assemble_reading_order`]'s *current* output on `page` -- i.e. it is a
+/// current-behavior snapshot, not a desired-behavior assertion like every hand-authored
+/// case's `expected` block. See [`RegressionCase::draft`].
+pub struct DraftCase<'a> {
+    /// A short, unique, human-readable identifier for this case.
+    pub id: &'a str,
+    /// The mining pipeline's best guess at which checklist item this page
+    /// exercises -- a hypothesis for the human reviewer to confirm or correct, not a
+    /// verified tag.
+    pub pitfall: Pitfall,
+    /// The mining pipeline's best guess at this page's root cause -- likewise a
+    /// hypothesis to confirm or correct.
+    pub root_cause: RootCause,
+    /// A human-readable description of where this page came from (e.g. its source
+    /// dataset, image id, and file name) and why it was flagged, so a reviewer knows
+    /// what to verify.
+    pub description: &'a str,
+    /// The (already minimized) page to encode as the case's document.
+    pub page: &'a Page,
+}
+
+/// Renders `draft` as corpus-schema JSON: `draft: true`, and `expected.reading_order`
+/// pre-filled from running [`assemble_reading_order`] on `draft.page` right now (see
+/// [`DraftCase`]'s docs on why that's a snapshot, not a desired-behavior assertion).
+///
+/// # Errors
+///
+/// Returns [`CorpusError::Serialize`] if JSON serialization fails (in practice only
+/// reachable via non-finite `f32` coordinates, which `serde_json` refuses to encode).
+pub fn draft_case_json(draft: &DraftCase) -> Result<String, CorpusError> {
+    let document = Document {
+        pages: vec![draft.page.clone()],
+    };
+    let assembled = assemble_reading_order(&document);
+    let reading_order: Vec<String> = assembled.pages[0].blocks.iter().map(|b| b.text()).collect();
+
+    let blocks: Vec<BlockFile> = draft
+        .page
+        .blocks
+        .iter()
+        .map(|block| BlockFile {
+            lines: block
+                .lines
+                .iter()
+                .map(|line| LineFile {
+                    text: line.text.clone(),
+                    bbox: [
+                        line.bbox.left,
+                        line.bbox.bottom,
+                        line.bbox.right,
+                        line.bbox.top,
+                    ],
+                    font_size: line
+                        .words
+                        .first()
+                        .and_then(|w| w.chars.first())
+                        .map(|c| c.font_size)
+                        .unwrap_or_else(default_font_size),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let case_file = CaseFile {
+        id: draft.id.to_string(),
+        draft: true,
+        pitfall: pitfall_slug(draft.pitfall).to_string(),
+        root_cause: root_cause_slug(draft.root_cause).to_string(),
+        description: draft.description.to_string(),
+        page: PageFile {
+            width: draft.page.width,
+            height: draft.page.height,
+            blocks,
+        },
+        expected: ExpectedFile {
+            reading_order: Some(reading_order),
+            classes: Vec::new(),
+        },
+    };
+
+    serde_json::to_string_pretty(&case_file).map_err(CorpusError::Serialize)
+}
+
+/// Writes `draft` as a draft case file to `dir/<pitfall_slug>/<id>.json`, creating the
+/// pitfall subdirectory if needed.
+///
+/// # Errors
+///
+/// Returns [`CorpusError::Serialize`] if rendering fails (see [`draft_case_json`]),
+/// [`CorpusError::DraftExists`] if the target path already exists (drafts are never
+/// silently overwritten -- a human review may have already edited that file), or
+/// [`CorpusError::Io`] if creating the directory or writing the file fails.
+pub fn write_draft_case(dir: &Path, draft: &DraftCase) -> Result<PathBuf, CorpusError> {
+    let json = draft_case_json(draft)?;
+
+    let subdir = dir.join(pitfall_slug(draft.pitfall));
+    std::fs::create_dir_all(&subdir).map_err(|source| CorpusError::Io {
+        path: subdir.clone(),
+        source,
+    })?;
+
+    let path = subdir.join(format!("{}.json", draft.id));
+    if path.exists() {
+        return Err(CorpusError::DraftExists { path });
+    }
+
+    std::fs::write(&path, json).map_err(|source| CorpusError::Io {
+        path: path.clone(),
+        source,
+    })?;
+
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +828,111 @@ mod tests {
 
         let cases = load_corpus(&dir).expect("corpus should load");
         assert_eq!(cases.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn draft_page() -> Page {
+        fn line(text: &str, bbox: [f32; 4]) -> Line {
+            let bbox = BBox {
+                left: bbox[0],
+                bottom: bbox[1],
+                right: bbox[2],
+                top: bbox[3],
+            };
+            let chars: Vec<Char> = text
+                .chars()
+                .map(|ch| Char {
+                    unicode: Some(ch),
+                    bbox,
+                    font_name: "Draft".to_string(),
+                    font_size: 10.0,
+                })
+                .collect();
+            let word = Word {
+                text: text.to_string(),
+                bbox,
+                chars,
+            };
+            Line {
+                text: text.to_string(),
+                bbox,
+                words: vec![word],
+            }
+        }
+        fn block(text: &str, bbox: [f32; 4]) -> Block {
+            let line = line(text, bbox);
+            Block {
+                bbox: line.bbox,
+                lines: vec![line],
+            }
+        }
+
+        Page {
+            index: 0,
+            width: 600.0,
+            height: 800.0,
+            blocks: vec![
+                block("Right one", [320.0, 700.0, 560.0, 750.0]),
+                block("Left one", [40.0, 700.0, 280.0, 750.0]),
+                block("Right two", [320.0, 640.0, 560.0, 690.0]),
+                block("Left two", [40.0, 640.0, 280.0, 690.0]),
+            ],
+        }
+    }
+
+    #[test]
+    fn write_draft_case_round_trips_through_load_case() {
+        let dir = std::env::temp_dir().join("pdfspatial_corpus_test_draft_round_trip");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let page = draft_page();
+        let draft = DraftCase {
+            id: "mined-example",
+            pitfall: Pitfall::MultiColumn,
+            root_cause: RootCause::Ordering,
+            description: "mined from a synthetic multi-column page",
+            page: &page,
+        };
+
+        let path = write_draft_case(&dir, &draft).expect("draft should write");
+        assert_eq!(path, dir.join("multi_column").join("mined-example.json"));
+
+        let case = load_case(&path).expect("draft should load back");
+        assert_eq!(case.id, "mined-example");
+        assert!(case.draft);
+        assert_eq!(case.pitfall, Pitfall::MultiColumn);
+        assert_eq!(case.root_cause, RootCause::Ordering);
+        assert_eq!(case.document.pages[0].blocks.len(), page.blocks.len());
+
+        // A draft's expected.reading_order is a snapshot of assemble_reading_order's
+        // current output, so it must already pass evaluate_case trivially -- this is
+        // exactly why the behavioral scoreboard must exclude drafts.
+        let outcome = evaluate_case(&case);
+        assert!(outcome.passed);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_draft_case_refuses_to_overwrite_existing_file() {
+        let dir = std::env::temp_dir().join("pdfspatial_corpus_test_draft_exists");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let page = draft_page();
+        let draft = DraftCase {
+            id: "mined-example",
+            pitfall: Pitfall::MultiColumn,
+            root_cause: RootCause::Ordering,
+            description: "mined from a synthetic multi-column page",
+            page: &page,
+        };
+
+        write_draft_case(&dir, &draft).expect("first write should succeed");
+        let result = write_draft_case(&dir, &draft);
+        assert!(matches!(result, Err(CorpusError::DraftExists { .. })));
 
         std::fs::remove_dir_all(&dir).ok();
     }

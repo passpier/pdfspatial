@@ -26,7 +26,7 @@ pub mod corpus;
 
 use crate::layout::{Region, RegionClass};
 use crate::metrics;
-use crate::{Document, assemble::assemble_reading_order};
+use crate::{Block, Document, Page, assemble::assemble_reading_order};
 use std::collections::BTreeMap;
 
 /// A Stage 2 validation dashboard: region-detection fidelity aggregated over a set of
@@ -270,6 +270,160 @@ pub fn rank_pages_by_reorder(document: &Document) -> Vec<PageReorderRank> {
     ranks
 }
 
+/// A minimized reading-order repro: the smallest subset of a page's blocks (found by
+/// [`minimize_reorder_repro`]) that [`assemble_reading_order`] still reorders relative
+/// to its naive (as-extracted) order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReproMinimization {
+    /// The minimized page: a subset of the original's blocks (in their original,
+    /// naive order), with the original `index`/`width`/`height` preserved -- XY-cut's
+    /// gutter/gap thresholds are page-relative, so shrinking the page dimensions would
+    /// change *why* the repro reorders, not just its size.
+    pub page: Page,
+    /// The number of blocks on the page passed to [`minimize_reorder_repro`], before
+    /// minimization -- context for judging how much smaller [`page`](Self::page) is.
+    pub original_block_count: usize,
+    /// [`metrics::reading_order_edit_distance`] between the minimized page's naive
+    /// order and [`assemble_reading_order`]'s output on it -- always `> 0`, since a
+    /// page that doesn't reorder is never returned (see [`minimize_reorder_repro`]).
+    pub reorder_edit_distance: usize,
+}
+
+/// Finds a minimal subset of `page`'s blocks that still reproduces a reading-order
+/// reordering, for turning a [`PageReorderRank`]-flagged real-dataset page into a
+/// reviewable `fixtures/` regression case instead of dumping the whole (often
+/// hundreds-of-blocks) page.
+///
+/// # Why this, and why greedy
+///
+/// Real pages mined via [`crate::eval::doclaynet::document_from_cells`] reconstruct to
+/// one block per PDF text cell -- far too large to hand-author as a minimal repro, and
+/// the corpus schema (see [`crate::eval::corpus`]) identifies blocks by their exact
+/// text, which real pages routinely repeat (page numbers, running headers, "Table 1").
+/// This function first deduplicates by block text (the same identity
+/// [`metrics::reading_order_edit_distance`] already uses via
+/// [`PageReorderRank::reorder_edit_distance`], so a duplicate-text block already makes
+/// that signal ambiguous -- not merely a corpus-schema workaround), then greedily
+/// removes blocks one at a time (from the end, backward), keeping each removal only if
+/// the remaining blocks still reorder. This is a textbook greedy shrink: `O(n)`
+/// predicate evaluations for an `n`-block page, each evaluation itself
+/// [`assemble_reading_order`] plus an `O(n)` sequence comparison. It only guarantees
+/// 1-minimality (no single further block can be dropped), not a globally smallest
+/// witness -- a full delta-debugging (`ddmin`) pass could shrink further in some cases,
+/// but is disproportionate here: greedy already collapses a page-full of cells down to
+/// the handful of blocks that actually drive the reorder.
+///
+/// Returns `None` if `page` doesn't reorder to begin with (nothing to reproduce), or if
+/// deduplication alone removes the reordering signal (e.g. it depended on two blocks
+/// sharing text) -- both cases the caller should report as skipped rather than emit as
+/// an empty or misleading case.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::eval::minimize_reorder_repro;
+/// use pdfspatial_core::{BBox, Block, Line, Page, Word};
+///
+/// fn block(text: &str, bbox: BBox) -> Block {
+///     let word = Word { text: text.into(), bbox, chars: vec![] };
+///     let line = Line { text: text.into(), bbox, words: vec![word] };
+///     Block { bbox, lines: vec![line] }
+/// }
+///
+/// fn bbox(left: f32, bottom: f32, right: f32, top: f32) -> BBox {
+///     BBox { left, bottom, right, top }
+/// }
+///
+/// // A two-column pair (interleaved -- reorders) plus several single-column "noise"
+/// // blocks that don't contribute to the reordering.
+/// let page = Page {
+///     index: 0,
+///     width: 600.0,
+///     height: 800.0,
+///     blocks: vec![
+///         block("Right one", bbox(320.0, 700.0, 560.0, 750.0)),
+///         block("Left one", bbox(40.0, 700.0, 280.0, 750.0)),
+///         block("Right two", bbox(320.0, 640.0, 560.0, 690.0)),
+///         block("Left two", bbox(40.0, 640.0, 280.0, 690.0)),
+///         block("Noise A", bbox(40.0, 500.0, 560.0, 550.0)),
+///         block("Noise B", bbox(40.0, 400.0, 560.0, 450.0)),
+///     ],
+/// };
+///
+/// let minimized = minimize_reorder_repro(&page).expect("page reorders");
+/// assert!(minimized.page.blocks.len() < minimized.original_block_count);
+/// assert!(minimized.reorder_edit_distance > 0);
+/// ```
+pub fn minimize_reorder_repro(page: &Page) -> Option<ReproMinimization> {
+    let original_block_count = page.blocks.len();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut blocks: Vec<Block> = Vec::new();
+    for block in &page.blocks {
+        if seen.insert(block.text()) {
+            blocks.push(block.clone());
+        }
+    }
+
+    if !reorders(&blocks, page.width, page.height) {
+        return None;
+    }
+
+    let mut index = blocks.len();
+    while index > 0 {
+        index -= 1;
+        let removed = blocks.remove(index);
+        if !reorders(&blocks, page.width, page.height) {
+            blocks.insert(index, removed);
+        }
+    }
+
+    let naive_order: Vec<String> = blocks.iter().map(|b| b.text()).collect();
+    let scratch = Page {
+        index: page.index,
+        width: page.width,
+        height: page.height,
+        blocks: blocks.clone(),
+    };
+    let assembled = assemble_reading_order(&Document {
+        pages: vec![scratch],
+    });
+    let assembled_order: Vec<String> = assembled.pages[0].blocks.iter().map(|b| b.text()).collect();
+    let naive_refs: Vec<&str> = naive_order.iter().map(String::as_str).collect();
+    let assembled_refs: Vec<&str> = assembled_order.iter().map(String::as_str).collect();
+
+    Some(ReproMinimization {
+        page: Page {
+            index: page.index,
+            width: page.width,
+            height: page.height,
+            blocks,
+        },
+        original_block_count,
+        reorder_edit_distance: metrics::reading_order_edit_distance(&assembled_refs, &naive_refs),
+    })
+}
+
+/// `true` if [`assemble_reading_order`] changes `blocks`' text order at all, i.e. the
+/// reordering predicate [`minimize_reorder_repro`]'s greedy shrink preserves.
+fn reorders(blocks: &[Block], page_width: f32, page_height: f32) -> bool {
+    if blocks.is_empty() {
+        return false;
+    }
+    let naive_order: Vec<String> = blocks.iter().map(|b| b.text()).collect();
+    let scratch = Page {
+        index: 0,
+        width: page_width,
+        height: page_height,
+        blocks: blocks.to_vec(),
+    };
+    let assembled = assemble_reading_order(&Document {
+        pages: vec![scratch],
+    });
+    let assembled_order: Vec<String> = assembled.pages[0].blocks.iter().map(|b| b.text()).collect();
+    naive_order != assembled_order
+}
+
 /// Arithmetic mean of an iterator of `f32`s, or `0.0` if it's empty.
 fn mean(values: impl Iterator<Item = f32> + Clone) -> f32 {
     let count = values.clone().count();
@@ -434,5 +588,67 @@ mod tests {
 
         assert_eq!(ranked[0].page_index, 0);
         assert_eq!(ranked[1].page_index, 1);
+    }
+
+    #[test]
+    fn minimize_reorder_repro_shrinks_noisy_page_to_the_reordering_blocks() {
+        // A reordering two-column pair plus several single-column "noise" blocks that
+        // don't contribute to the reordering at all -- the greedy shrink should drop
+        // (at least some of) the noise while keeping the page reordering.
+        let page = crate::Page {
+            index: 0,
+            width: 600.0,
+            height: 800.0,
+            blocks: vec![
+                text_block("Right one", bbox(320.0, 700.0, 560.0, 750.0)),
+                text_block("Left one", bbox(40.0, 700.0, 280.0, 750.0)),
+                text_block("Right two", bbox(320.0, 640.0, 560.0, 690.0)),
+                text_block("Left two", bbox(40.0, 640.0, 280.0, 690.0)),
+                text_block("Noise A", bbox(40.0, 500.0, 560.0, 550.0)),
+                text_block("Noise B", bbox(40.0, 400.0, 560.0, 450.0)),
+                text_block("Noise C", bbox(40.0, 300.0, 560.0, 350.0)),
+            ],
+        };
+
+        let minimized = minimize_reorder_repro(&page).expect("page should reorder");
+
+        assert_eq!(minimized.original_block_count, 7);
+        assert!(minimized.page.blocks.len() < minimized.original_block_count);
+        assert!(minimized.reorder_edit_distance > 0);
+        assert_eq!(minimized.page.width, page.width);
+        assert_eq!(minimized.page.height, page.height);
+        assert!(reorders(&minimized.page.blocks, page.width, page.height));
+    }
+
+    #[test]
+    fn minimize_reorder_repro_returns_none_for_already_ordered_page() {
+        let page = crate::Page {
+            index: 0,
+            width: 600.0,
+            height: 800.0,
+            blocks: vec![
+                text_block("First", bbox(40.0, 700.0, 560.0, 750.0)),
+                text_block("Second", bbox(40.0, 600.0, 560.0, 650.0)),
+            ],
+        };
+
+        assert_eq!(minimize_reorder_repro(&page), None);
+    }
+
+    #[test]
+    fn minimize_reorder_repro_returns_none_when_dedup_removes_the_signal() {
+        // Both "columns" share identical text, so deduplicating by block text collapses
+        // the page to a single block before any reordering can be observed.
+        let page = crate::Page {
+            index: 0,
+            width: 600.0,
+            height: 800.0,
+            blocks: vec![
+                text_block("Same", bbox(320.0, 700.0, 560.0, 750.0)),
+                text_block("Same", bbox(40.0, 700.0, 280.0, 750.0)),
+            ],
+        };
+
+        assert_eq!(minimize_reorder_repro(&page), None);
     }
 }

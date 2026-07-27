@@ -58,7 +58,12 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
    pages by how heavily `assemble_reading_order` reordered them — an unsupervised proxy
    for "which pages most likely have a Stage 1 reading-order failure worth mining into a
    `fixtures/` regression case next," since DocLayNet itself ships no gold reading order.
-   See `examples/doclaynet_mine.rs`.
+   See `examples/doclaynet_mine.rs`. `eval::minimize_reorder_repro` and
+   `eval::corpus::write_draft_case` carry that ranking the rest of the way: shrinking a
+   ranked page to the handful of blocks that actually drive the reordering and emitting
+   it as an unreviewed **draft** `fixtures/`-schema case (`"draft": true`) for a human to
+   verify, re-tag, and promote. See `examples/doclaynet_drafts.rs` and
+   `fixtures/README.md`'s "Mining drafts from a real sample" section.
 4. **Refinement** (heuristics implemented; fine-tuning stubbed) — [`layout.rs`](crates/pdfspatial-core/src/layout.rs)
    classifies regions with deterministic text-layer heuristics (Title, SectionHeader,
    ListItem, Caption, PageHeader/Footer, Text — `Table`/`Picture`/`Formula` need the
@@ -147,6 +152,18 @@ report against a real DocLayNet sample:
 ```sh
 cargo run --example doclaynet_mine --features doclaynet -- <coco.json> <cells_dir>
 ```
+
+`examples/doclaynet_drafts.rs` (gated on both `doclaynet` and `stage3`, so also exercised
+by `tests/stage3_mining.rs` under `cargo test --all-features`) takes that ranking further,
+mining the top-N ranked pages into minimal, reviewable draft `fixtures/`-schema cases:
+
+```sh
+cargo run --example doclaynet_drafts --features doclaynet,stage3 -- \
+  <coco.json> <cells_dir> --out <dir> [--top-n 5]
+```
+
+See `fixtures/README.md`'s "Mining drafts from a real sample" section for the review
+checklist before promoting a draft into the real corpus.
 
 ### Running benchmarks
 

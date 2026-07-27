@@ -28,7 +28,10 @@ serialization) grounded in spatial (bounding-box) extraction rather than layout 
   (`corpus_cases_meet_expected_behavior`) is `#[ignore]`d — it asserts each case's *desired*
   post-Stage-4 behavior and fails today by design; run
   `cargo test --features stage3 -- --ignored` to print the full scoreboard. See
-  `fixtures/README.md`.
+  `fixtures/README.md`. `tests/stage3_mining.rs` (gated on `doclaynet` AND `stage3`, so
+  run by `cargo test --all-features`) exercises the ranked-page → minimal-repro →
+  draft-case mining pipeline (`eval::minimize_reorder_repro`,
+  `eval::corpus::write_draft_case`) end to end against the vendored DocLayNet fixture.
 - `cargo test --all-features` (matches CI) — also runs `tests/stage1_baseline.rs`, which
   **requires** a native PDFium library: set `PDFSPATIAL_PDFIUM_LIB` to the lib file/dir, or place
   it on the OS dynamic-loader path (`DYLD_LIBRARY_PATH` on macOS). `pdfium-render` does not bundle

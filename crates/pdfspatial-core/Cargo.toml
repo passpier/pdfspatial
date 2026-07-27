@@ -31,6 +31,11 @@ name = "doclaynet_mine"
 path = "../../examples/doclaynet_mine.rs"
 required-features = ["doclaynet"]
 
+[[example]]
+name = "doclaynet_drafts"
+path = "../../examples/doclaynet_drafts.rs"
+required-features = ["doclaynet", "stage3"]
+
 [[bench]]
 name = "stage2_eval"
 path = "../../benches/stage2_eval.rs"

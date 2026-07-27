@@ -159,6 +159,46 @@ real-data DocLayNet mining pass (once PDFium and a DocLayNet sample are availabl
 this environment); this corpus establishes the format, harness, and a 2-case-per-pitfall
 seed for the reachable subset.
 
+## Mining drafts from a real sample
+
+`eval::rank_pages_by_reorder` / `eval::doclaynet::mine_reading_order_failures` rank a
+DocLayNet sample's pages by reading-order reordering severity (see `examples/doclaynet_mine.rs`).
+`examples/doclaynet_drafts.rs` consumes that ranking end to end: it takes the top-N
+most-reordered pages, shrinks each one via `eval::minimize_reorder_repro` (a greedy
+backward prune that keeps removing blocks as long as the survivors still reorder --
+turning a page's worth of `pdf_cells` into the handful of blocks that actually drive the
+reordering), and writes each result as a **draft** case via `eval::corpus::write_draft_case`:
+
+```sh
+cargo run --example doclaynet_drafts --features doclaynet,stage3 -- \
+  <coco.json> <cells_dir> --out <dir> [--top-n 5]
+
+# or, with DOCLAYNET_DIR set, positional args default to
+# $DOCLAYNET_DIR/COCO/val.json and $DOCLAYNET_DIR/JSON:
+cargo run --example doclaynet_drafts --features doclaynet,stage3 -- --out <dir>
+```
+
+`--out` is required and is never `fixtures/` itself -- a draft is unreviewed output, not
+a regression case yet. A draft carries `"draft": true` and an `expected.reading_order`
+that is a **snapshot of `assemble_reading_order`'s current output**, not a desired
+post-fix order like every hand-authored case above. That's why `draft` cases are excluded
+from `corpus_covers_seeded_pitfalls` and the `corpus_cases_meet_expected_behavior`
+scoreboard (`tests/stage3_corpus.rs`) -- they'd otherwise pass trivially and mask real
+regressions -- though `corpus_is_wellformed` still checks their shape.
+
+Promoting a draft into the real corpus is a manual review step:
+
+1. Open the draft JSON and confirm it's actually a minimal, legible repro of a real
+   reordering failure (not an artifact of `document_from_cells`'s one-cell-per-block
+   under-grouping -- see `eval::doclaynet`'s module docs).
+2. Re-tag `pitfall`/`root_cause` -- the mining pipeline always guesses `multi_column`/
+   `ordering` (its own hypothesis, since that's what the ranking signal measures), which
+   may not be the actual failure mode.
+3. Rewrite `expected.reading_order` to the *desired* order, not the current one --
+   `assemble_reading_order`'s snapshot is deliberately wrong for exactly this file until
+   Stage 4 fixes the pitfall.
+4. Delete the `"draft": true` field and move the file into `fixtures/<pitfall>/`.
+
 ## Running
 
 ```sh

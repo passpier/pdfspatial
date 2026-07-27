@@ -18,6 +18,13 @@
 //!   `cargo test --features stage3 -- --ignored` to print the full per-case scoreboard;
 //!   it's expected to fail today by design, and should be re-run after any Stage 4 fix
 //!   to see which cases flipped to passing.
+//!
+//! Auto-mined draft cases (`eval::corpus::DraftCase`, `RegressionCase::draft`) still
+//! parse and get checked by `corpus_is_wellformed` -- they must still be shaped like a
+//! valid case -- but are excluded from `corpus_covers_seeded_pitfalls` (they're
+//! unreviewed, not seeded coverage) and `corpus_cases_meet_expected_behavior` (their
+//! `expected` is a current-behavior snapshot, so they'd pass trivially and mask real
+//! regressions). See `fixtures/README.md`'s "Mining drafts from a real sample" section.
 
 #![cfg(feature = "stage3")]
 
@@ -112,8 +119,10 @@ fn corpus_is_wellformed() {
 fn corpus_covers_seeded_pitfalls() {
     let cases = load_corpus(&corpus_dir()).expect("corpus should load without error");
 
+    // Draft cases (see `eval::corpus::DraftCase`) are unreviewed mining output, not
+    // hand-authored coverage -- they don't count toward the seeded checklist.
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for case in &cases {
+    for case in cases.iter().filter(|c| !c.draft) {
         *counts.entry(pitfall_slug(case.pitfall)).or_insert(0) += 1;
     }
 
@@ -133,7 +142,16 @@ fn corpus_covers_seeded_pitfalls() {
 fn corpus_cases_meet_expected_behavior() {
     let cases = load_corpus(&corpus_dir()).expect("corpus should load without error");
 
-    let outcomes: Vec<_> = cases.iter().map(evaluate_case).collect();
+    // Draft cases (see `eval::corpus::DraftCase`) encode `expected` as a snapshot of
+    // *current* pipeline behavior, not desired post-fix behavior -- they pass this
+    // scoreboard trivially by construction, so including them would mask real
+    // regressions. They stay out of `fixtures/` until reviewed and re-authored anyway;
+    // this filter is a defensive guard against that convention slipping.
+    let outcomes: Vec<_> = cases
+        .iter()
+        .filter(|c| !c.draft)
+        .map(evaluate_case)
+        .collect();
     let failing: Vec<_> = outcomes.iter().filter(|o| !o.passed).collect();
 
     if !failing.is_empty() {
