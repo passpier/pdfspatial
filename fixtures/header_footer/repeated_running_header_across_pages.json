@@ -1,0 +1,64 @@
+{
+  "id": "header_footer-repeated-running-header-across-pages",
+  "pitfall": "header_footer",
+  "root_cause": "classification",
+  "description": "A 1-line running header ('Chapter 4: Results — Page N') sitting only 15pt below the header-band cutoff (top=775pt >= 736pt/92%-of-800) but just 5pt above the body block below it -- well under the 16pt/2%-of-800 body-gap threshold classify_regions requires to call it detached. The single-page geometric rule correctly declines it (it looks like the body's own first line), so only repeated-content detection across the 3 consecutive pages (same normalized text, same page-relative y-position, differing only by the page-number digit) can recognize it as a running header. Each page's body block is tall and textually distinct, so it must stay `text` and not get swept up by the repetition signal.",
+  "pages": [
+    {
+      "width": 600.0,
+      "height": 800.0,
+      "blocks": [
+        {
+          "lines": [
+            { "text": "Chapter 4: Results — Page 1", "bbox": [40.0, 760.0, 300.0, 775.0], "font_size": 10.0 }
+          ]
+        },
+        {
+          "lines": [
+            { "text": "This section reports quarterly revenue growth across all four operating regions in detail.", "bbox": [40.0, 300.0, 560.0, 755.0], "font_size": 10.0 }
+          ]
+        }
+      ]
+    },
+    {
+      "width": 600.0,
+      "height": 800.0,
+      "blocks": [
+        {
+          "lines": [
+            { "text": "Chapter 4: Results — Page 2", "bbox": [40.0, 760.0, 300.0, 775.0], "font_size": 10.0 }
+          ]
+        },
+        {
+          "lines": [
+            { "text": "Regional performance varied due to seasonal demand shifts and currency headwinds this quarter.", "bbox": [40.0, 300.0, 560.0, 755.0], "font_size": 10.0 }
+          ]
+        }
+      ]
+    },
+    {
+      "width": 600.0,
+      "height": 800.0,
+      "blocks": [
+        {
+          "lines": [
+            { "text": "Chapter 4: Results — Page 3", "bbox": [40.0, 760.0, 300.0, 775.0], "font_size": 10.0 }
+          ]
+        },
+        {
+          "lines": [
+            { "text": "Management expects continued growth next quarter driven by new product launches overseas.", "bbox": [40.0, 300.0, 560.0, 755.0], "font_size": 10.0 }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "classes": [
+      { "block_text": "Chapter 4: Results — Page 1", "class": "page_header" },
+      { "block_text": "Chapter 4: Results — Page 2", "class": "page_header" },
+      { "block_text": "Chapter 4: Results — Page 3", "class": "page_header" },
+      { "block_text": "This section reports quarterly revenue growth across all four operating regions in detail.", "class": "text" }
+    ]
+  }
+}

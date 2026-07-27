@@ -15,6 +15,15 @@
 //! [`RegionClass::Table`], [`RegionClass::Picture`], and [`RegionClass::Formula`] require
 //! a genuine layout/vision model and are never produced here — see the module docs above
 //! for why.
+//!
+//! [`RegionClass::PageHeader`]/[`RegionClass::PageFooter`] come from two independent
+//! signals, either of which is sufficient: a single-page geometric shape test (thin
+//! strip in the top/bottom band, detached from the body by a minimum gap — see
+//! [`classify_block`]), and cross-page repeated-content detection (the same
+//! digit-normalized text recurring at the same page-relative position across
+//! [`REPEATED_BAND_MIN_PAGES`] consecutive pages — see [`repeated_running_bands`]) for
+//! running headers/footers too tall or too close to the body for the geometric rule
+//! alone to catch.
 
 use crate::{BBox, Block, Document};
 
@@ -72,10 +81,23 @@ const HEADER_BAND_FRACTION: f32 = 0.92;
 /// A block sitting below this fraction of the page height is in the footer band.
 const FOOTER_BAND_FRACTION: f32 = 0.08;
 
-/// A header/footer-band block spanning more than this many lines is treated as body
-/// text instead (long text repeated near the page edge is unlikely to be a running
-/// header/footer).
-const HEADER_FOOTER_MAX_LINES: usize = 2;
+/// A running header/footer is a thin strip; a band block taller than this fraction of
+/// the page is body text that merely starts (or ends) at the page edge, not a running
+/// header/footer.
+const HEADER_FOOTER_MAX_HEIGHT_FRACTION: f32 = 0.10;
+
+/// A running header/footer is visually detached from the body. A band block closer than
+/// this fraction of the page height to its nearest neighbour is part of the body flow
+/// rather than a separate running header/footer.
+const HEADER_FOOTER_MIN_BODY_GAP_FRACTION: f32 = 0.02;
+
+/// How many consecutive pages a band block's (normalized) text must recur on to count as
+/// running header/footer content, per the roadmap's repeated-content signal.
+const REPEATED_BAND_MIN_PAGES: usize = 2;
+
+/// Page-relative vertical tolerance for "same y-position range" when matching a band
+/// block's position across pages.
+const REPEATED_BAND_Y_TOLERANCE: f32 = 0.02;
 
 /// A caption/list block spanning more than this many lines is treated as body text.
 const SHORT_BLOCK_MAX_LINES: usize = 2;
@@ -90,14 +112,24 @@ const SHORT_BLOCK_MAX_LINES: usize = 2;
 /// its region by exact bbox equality.
 pub fn classify_regions(document: &Document) -> Vec<Region> {
     let mut regions = Vec::new();
+    let repeated_bands = repeated_running_bands(document);
 
     for page in &document.pages {
         let body_font_size = body_median_font_size(page);
         let mut seen_title = false;
 
         for block in &page.blocks {
-            let (class, confidence) =
-                classify_block(block, page.height, body_font_size, &mut seen_title);
+            let repeated_band = band_of(block, page.height).filter(|band| {
+                repeated_bands.contains(&(*band, normalize_running_text(&block.text())))
+            });
+            let (class, confidence) = classify_block(
+                block,
+                &page.blocks,
+                page.height,
+                body_font_size,
+                repeated_band,
+                &mut seen_title,
+            );
             regions.push(Region {
                 class,
                 bbox: block.bbox,
@@ -109,27 +141,54 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
     regions
 }
 
+/// Which page edge a block sits against, per [`HEADER_BAND_FRACTION`]/[`FOOTER_BAND_FRACTION`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Band {
+    /// The block sits in the top-of-page header band.
+    Header,
+    /// The block sits in the bottom-of-page footer band.
+    Footer,
+}
+
 /// Classifies a single block. `seen_title` is threaded through a page's blocks so at
 /// most one [`RegionClass::Title`] is emitted per page (the first oversized block near
 /// the top); later oversized blocks fall back to [`RegionClass::SectionHeader`].
+/// `repeated_band` is `Some` when this block's band and (normalized) text were found to
+/// recur across consecutive pages by [`repeated_running_bands`] -- the strongest signal,
+/// checked first.
 fn classify_block(
     block: &Block,
+    page_blocks: &[Block],
     page_height: f32,
     body_font_size: f32,
+    repeated_band: Option<Band>,
     seen_title: &mut bool,
 ) -> (RegionClass, f32) {
     let line_count = block.lines.len();
     let font_size = block_font_size(block);
     let text = block.text();
 
+    match repeated_band {
+        Some(Band::Header) => return (RegionClass::PageHeader, 0.8),
+        Some(Band::Footer) => return (RegionClass::PageFooter, 0.8),
+        None => {}
+    }
+
     let in_header_band = block.bbox.top >= page_height * HEADER_BAND_FRACTION;
     let in_footer_band = block.bbox.bottom <= page_height * FOOTER_BAND_FRACTION;
+    let is_thin_strip = block.bbox.height() <= page_height * HEADER_FOOTER_MAX_HEIGHT_FRACTION;
 
-    if in_header_band && line_count <= HEADER_FOOTER_MAX_LINES {
-        return (RegionClass::PageHeader, 0.6);
+    if in_header_band && is_thin_strip {
+        let gap = gap_to_nearest_block(block, page_blocks, /* below */ true);
+        if gap >= page_height * HEADER_FOOTER_MIN_BODY_GAP_FRACTION {
+            return (RegionClass::PageHeader, 0.6);
+        }
     }
-    if in_footer_band && line_count <= HEADER_FOOTER_MAX_LINES {
-        return (RegionClass::PageFooter, 0.6);
+    if in_footer_band && is_thin_strip {
+        let gap = gap_to_nearest_block(block, page_blocks, /* below */ false);
+        if gap >= page_height * HEADER_FOOTER_MIN_BODY_GAP_FRACTION {
+            return (RegionClass::PageFooter, 0.6);
+        }
     }
 
     if is_list_item(&text) {
@@ -152,6 +211,140 @@ fn classify_block(
     }
 
     (RegionClass::Text, 0.5)
+}
+
+/// Vertical distance from `block` to the nearest other block on the page in the given
+/// direction: `below == true` looks for the closest block whose top edge is at or below
+/// `block`'s bottom edge (the header-candidate direction); `below == false` looks for the
+/// closest block whose bottom edge is at or above `block`'s top edge (the
+/// footer-candidate direction). Returns `f32::INFINITY` when nothing lies that way -- a
+/// lone block on the page counts as fully detached. A vertically overlapping block
+/// yields a gap of `0.0` (saturating, since overlapping bboxes can subtract negative).
+fn gap_to_nearest_block(block: &Block, page_blocks: &[Block], below: bool) -> f32 {
+    page_blocks
+        .iter()
+        .filter(|other| !std::ptr::eq(*other, block))
+        .map(|other| {
+            if below {
+                (block.bbox.bottom - other.bbox.top).max(0.0)
+            } else {
+                (other.bbox.bottom - block.bbox.top).max(0.0)
+            }
+        })
+        .filter(|gap| gap.is_finite())
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// Classifies which page-edge band `block` sits in, if any -- the same
+/// [`HEADER_BAND_FRACTION`]/[`FOOTER_BAND_FRACTION`] geometry [`classify_block`] uses, but
+/// without the shape/gap tests, so a block that fails those can still be considered for
+/// [`repeated_running_bands`]'s cross-page repetition signal.
+fn band_of(block: &Block, page_height: f32) -> Option<Band> {
+    if block.bbox.top >= page_height * HEADER_BAND_FRACTION {
+        Some(Band::Header)
+    } else if block.bbox.bottom <= page_height * FOOTER_BAND_FRACTION {
+        Some(Band::Footer)
+    } else {
+        None
+    }
+}
+
+/// Lowercased, whitespace-collapsed, digit-run-masked form of `text`, so e.g. "Page 12"
+/// and "Page 13" normalize to the same string and are recognized as the same running
+/// header/footer despite the per-page page-number digits.
+fn normalize_running_text(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut prev_was_digit = false;
+    for word in text.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        for c in word.chars() {
+            let is_digit = c.is_ascii_digit();
+            if is_digit {
+                if !prev_was_digit {
+                    normalized.push('#');
+                }
+            } else {
+                normalized.push(c.to_ascii_lowercase());
+            }
+            prev_was_digit = is_digit;
+        }
+    }
+    normalized
+}
+
+/// Band texts (see [`Band`]) that recur at a stable page-relative vertical offset on at
+/// least [`REPEATED_BAND_MIN_PAGES`] *consecutive* pages -- the roadmap's "repeated
+/// content across N consecutive pages" signal for running headers/footers that are too
+/// tall, or too close to the body, for the single-page geometric rule in
+/// [`classify_block`] to catch on its own.
+fn repeated_running_bands(document: &Document) -> std::collections::HashSet<(Band, String)> {
+    let mut positions: std::collections::HashMap<(Band, String), Vec<(usize, f32)>> =
+        std::collections::HashMap::new();
+
+    for page in &document.pages {
+        if page.height <= 0.0 {
+            continue;
+        }
+        for block in &page.blocks {
+            let Some(band) = band_of(block, page.height) else {
+                continue;
+            };
+            let normalized = normalize_running_text(&block.text());
+            if normalized.is_empty() {
+                continue;
+            }
+            let rel_y = match band {
+                Band::Header => (page.height - block.bbox.top) / page.height,
+                Band::Footer => block.bbox.bottom / page.height,
+            };
+            positions
+                .entry((band, normalized))
+                .or_default()
+                .push((page.index, rel_y));
+        }
+    }
+
+    positions
+        .into_iter()
+        .filter(|(_, occurrences)| has_consecutive_run(occurrences))
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Returns `true` if `occurrences` (page index, page-relative y) contains a run of at
+/// least [`REPEATED_BAND_MIN_PAGES`] consecutive page indices all within
+/// [`REPEATED_BAND_Y_TOLERANCE`] of the run's first y-position.
+fn has_consecutive_run(occurrences: &[(usize, f32)]) -> bool {
+    if occurrences.len() < REPEATED_BAND_MIN_PAGES {
+        return false;
+    }
+
+    let mut sorted = occurrences.to_vec();
+    sorted.sort_by_key(|(page_index, _)| *page_index);
+
+    // `run_start` indexes the first element of the current consecutive-page run; every
+    // element in the run is compared back to its y-position, not to its immediate
+    // predecessor, so the tolerance can't drift across a long run one small step at a time.
+    let mut run_start = 0;
+    for i in 1..sorted.len() {
+        let (prev_page, _) = sorted[i - 1];
+        let (page_index, rel_y) = sorted[i];
+        let (_, run_start_y) = sorted[run_start];
+
+        let continues_run =
+            page_index == prev_page + 1 && (rel_y - run_start_y).abs() <= REPEATED_BAND_Y_TOLERANCE;
+        if !continues_run {
+            run_start = i;
+        }
+
+        if i - run_start + 1 >= REPEATED_BAND_MIN_PAGES {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// The median font size across every character on the page — a cheap proxy for "body
@@ -293,6 +486,18 @@ mod tests {
         }
     }
 
+    /// Like [`page`], but with an explicit index/height for multi-page documents and
+    /// fixture-matching geometry (the corpus's `header_footer` cases use an 800pt-tall
+    /// page, not this module's default 792pt).
+    fn page_at(index: usize, height: f32, blocks: Vec<Block>) -> Page {
+        Page {
+            index,
+            width: 600.0,
+            height,
+            blocks,
+        }
+    }
+
     #[test]
     fn large_font_top_block_is_title() {
         let title_bbox = BBox {
@@ -352,5 +557,273 @@ mod tests {
 
         let regions = classify_regions(&doc);
         assert_eq!(regions[0].class, RegionClass::PageHeader);
+    }
+
+    #[test]
+    fn multi_line_running_header_is_page_header() {
+        // Mirrors fixtures/header_footer/running_header_exceeds_line_limit.json: a
+        // 3-line running header, previously rejected outright by the old
+        // HEADER_FOOTER_MAX_LINES(2) cutoff.
+        let header = block(vec![
+            line(
+                "Company Name",
+                BBox {
+                    left: 40.0,
+                    bottom: 760.0,
+                    right: 300.0,
+                    top: 775.0,
+                },
+                10.0,
+            ),
+            line(
+                "Confidential Draft",
+                BBox {
+                    left: 40.0,
+                    bottom: 745.0,
+                    right: 300.0,
+                    top: 760.0,
+                },
+                10.0,
+            ),
+            line(
+                "Do Not Distribute",
+                BBox {
+                    left: 40.0,
+                    bottom: 730.0,
+                    right: 300.0,
+                    top: 745.0,
+                },
+                10.0,
+            ),
+        ]);
+        let body = block(vec![line(
+            "Body text of the document that continues on this page.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 560.0,
+                top: 400.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![header, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::PageHeader);
+    }
+
+    #[test]
+    fn multi_line_running_footer_is_page_footer() {
+        // Mirrors fixtures/header_footer/running_footer_exceeds_line_limit.json.
+        let body = block(vec![line(
+            "Body text of the document continues here.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 560.0,
+                top: 400.0,
+            },
+            10.0,
+        )]);
+        let footer = block(vec![
+            line(
+                "Page 12",
+                BBox {
+                    left: 40.0,
+                    bottom: 50.0,
+                    right: 300.0,
+                    top: 60.0,
+                },
+                8.0,
+            ),
+            line(
+                "Section 3: Results",
+                BBox {
+                    left: 40.0,
+                    bottom: 35.0,
+                    right: 300.0,
+                    top: 50.0,
+                },
+                8.0,
+            ),
+            line(
+                "www.example.com/docs",
+                BBox {
+                    left: 40.0,
+                    bottom: 20.0,
+                    right: 300.0,
+                    top: 35.0,
+                },
+                8.0,
+            ),
+        ]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![body, footer])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[1].class, RegionClass::PageFooter);
+    }
+
+    #[test]
+    fn tall_top_of_page_block_is_not_page_header() {
+        // A block that starts in the header band but spans most of the page is body
+        // text that merely reaches the top of the page, not a running header.
+        let bbox = BBox {
+            left: 40.0,
+            bottom: 100.0,
+            right: 560.0,
+            top: 785.0,
+        };
+        let b = block(vec![line(
+            "A very long article that starts near the top.",
+            bbox,
+            10.0,
+        )]);
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![b])],
+        };
+
+        let regions = classify_regions(&doc);
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn header_adjacent_to_body_is_not_page_header() {
+        // Thin and in-band, but only 5pt above the body block below it (well under the
+        // 16pt/2%-of-800 gap threshold) -- this looks like the body's own first line,
+        // not a detached running header.
+        let header = block(vec![line(
+            "Section lead-in",
+            BBox {
+                left: 40.0,
+                bottom: 760.0,
+                right: 300.0,
+                top: 775.0,
+            },
+            10.0,
+        )]);
+        let body = block(vec![line(
+            "Body text starting immediately below the heading above.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 560.0,
+                top: 755.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![header, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn repeated_band_text_across_pages_is_page_header() {
+        // Same shape as header_adjacent_to_body_is_not_page_header (geometrically
+        // rejected on every single page), but the header text recurs at the same
+        // page-relative position across 3 consecutive pages, varying only by page
+        // number -- the roadmap's repeated-content signal should catch it where the
+        // single-page geometric rule can't.
+        fn running_header_page(index: usize, page_num: u32, body_text: &str) -> Page {
+            let header = block(vec![line(
+                &format!("Chapter 4: Results - Page {page_num}"),
+                BBox {
+                    left: 40.0,
+                    bottom: 760.0,
+                    right: 300.0,
+                    top: 775.0,
+                },
+                10.0,
+            )]);
+            let body = block(vec![line(
+                body_text,
+                BBox {
+                    left: 40.0,
+                    bottom: 300.0,
+                    right: 560.0,
+                    top: 755.0,
+                },
+                10.0,
+            )]);
+            page_at(index, 800.0, vec![header, body])
+        }
+
+        // Body text varies by more than a digit (unlike the header) so it doesn't
+        // accidentally normalize to a matching repeated key of its own.
+        let doc = Document {
+            pages: vec![
+                running_header_page(0, 1, "Revenue grew across every operating region."),
+                running_header_page(1, 2, "Currency headwinds offset seasonal demand."),
+                running_header_page(2, 3, "New product launches are planned overseas."),
+            ],
+        };
+        let regions = classify_regions(&doc);
+
+        // Two regions per page, page-major order: header, body, header, body, ...
+        for page in 0..3 {
+            assert_eq!(
+                regions[page * 2].class,
+                RegionClass::PageHeader,
+                "page {page} header"
+            );
+            assert_eq!(
+                regions[page * 2 + 1].class,
+                RegionClass::Text,
+                "page {page} body"
+            );
+        }
+    }
+
+    #[test]
+    fn unrepeated_band_text_on_multipage_document_stays_text() {
+        // Same geometry as the repeated case (including the adjacent body block, so
+        // the single-page geometric rule can't accept it on its own) but the band text
+        // differs per page, not just by a digit -- repetition must not fire on every
+        // band block in a multi-page document.
+        fn distinct_header_page(index: usize, header_text: &str, body_text: &str) -> Page {
+            let header = block(vec![line(
+                header_text,
+                BBox {
+                    left: 40.0,
+                    bottom: 760.0,
+                    right: 300.0,
+                    top: 775.0,
+                },
+                10.0,
+            )]);
+            let body = block(vec![line(
+                body_text,
+                BBox {
+                    left: 40.0,
+                    bottom: 300.0,
+                    right: 560.0,
+                    top: 755.0,
+                },
+                10.0,
+            )]);
+            page_at(index, 800.0, vec![header, body])
+        }
+
+        let doc = Document {
+            pages: vec![
+                distinct_header_page(0, "Introduction", "Body content for page one."),
+                distinct_header_page(1, "Methodology", "Body content for page two."),
+                distinct_header_page(2, "Results", "Body content for page three."),
+            ],
+        };
+        let regions = classify_regions(&doc);
+
+        for region in &regions {
+            assert_eq!(region.class, RegionClass::Text);
+        }
     }
 }

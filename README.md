@@ -29,7 +29,7 @@ an intentional, documented stub — see [Status](#status).
 | Heuristic layout classification (Title, Header, List, Caption, ...) | ✅ Stable |
 | Structural Markdown serialization | ✅ Stable |
 | Validation metrics (TEDS, GIoU, region F1) against DocLayNet | ✅ Stable |
-| Regression corpus of known failure modes (25 seeded cases) | ✅ Stable |
+| Regression corpus of known failure modes (26 seeded cases) | ✅ Stable |
 | Vision-model region detection (`Table`/`Picture`/`Formula`) | 📋 Planned — documented `unimplemented!()` stub, needs an ONNX runtime + model weights, out of scope for now |
 
 See [`docs/PDF-to-Markdown Pipeline Roadmap.md`](docs/PDF-to-Markdown%20Pipeline%20Roadmap.md)
@@ -109,7 +109,7 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
 Accuracy is tracked against the [DocLayNet](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1)
 dataset (TEDS, GIoU, per-class F1), and known failure modes (multi-column
 gutters, footnotes, rotated text, borderless tables, ...) are captured as a
-25-case regression corpus under [`fixtures/`](fixtures) so fixes can be
+26-case regression corpus under [`fixtures/`](fixtures) so fixes can be
 validated instead of eyeballed.
 
 For the full detail — per-stage exit criteria, the failure-mode taxonomy, and
