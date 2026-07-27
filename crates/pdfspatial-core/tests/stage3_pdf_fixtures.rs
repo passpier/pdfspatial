@@ -44,6 +44,7 @@ fn pdf_backed_cases_match_frozen_snapshot() {
 
     let source = PdfiumSource::default();
     let root = workspace_root();
+    let mut mismatches: Vec<String> = Vec::new();
 
     for case in pdf_cases {
         let source_pdf = case
@@ -91,13 +92,15 @@ fn pdf_backed_cases_match_frozen_snapshot() {
         {
             let fresh_texts: Vec<String> = fresh_page.blocks.iter().map(|b| b.text()).collect();
             let frozen_texts: Vec<String> = frozen_page.blocks.iter().map(|b| b.text()).collect();
-            assert_eq!(
-                fresh_texts, frozen_texts,
-                "case {:?}, page {page_index}: re-extracted block text doesn't match the \
-                 frozen snapshot -- regenerate via \
-                 `cargo run --example stage3_pdf_cases --features stage3`",
-                case.id
-            );
+            if fresh_texts != frozen_texts {
+                mismatches.push(format!(
+                    "case {:?}, page {page_index}: re-extracted block text {fresh_texts:?} \
+                     doesn't match the frozen snapshot's {frozen_texts:?} -- regenerate via \
+                     `cargo run --example stage3_pdf_cases --features stage3`",
+                    case.id
+                ));
+                continue;
+            }
 
             for (block_index, (fresh_block, frozen_block)) in fresh_page
                 .blocks
@@ -105,21 +108,47 @@ fn pdf_backed_cases_match_frozen_snapshot() {
                 .zip(frozen_page.blocks.iter())
                 .enumerate()
             {
-                const EPSILON: f32 = 0.5;
-                let close = |a: f32, b: f32| (a - b).abs() <= EPSILON;
-                assert!(
-                    close(fresh_block.bbox.left, frozen_block.bbox.left)
-                        && close(fresh_block.bbox.bottom, frozen_block.bbox.bottom)
-                        && close(fresh_block.bbox.right, frozen_block.bbox.right)
-                        && close(fresh_block.bbox.top, frozen_block.bbox.top),
-                    "case {:?}, page {page_index}, block {block_index}: re-extracted bbox \
-                     {:?} drifted from the frozen snapshot's {:?} by more than {EPSILON}pt -- \
-                     regenerate via `cargo run --example stage3_pdf_cases --features stage3`",
-                    case.id,
-                    fresh_block.bbox,
-                    frozen_block.bbox
-                );
+                // Tolerance scales with font size: these fixtures use non-embedded base-14
+                // fonts, so PDFium substitutes a different physical font per platform (macOS
+                // locally vs Linux in CI) and the loose glyph box's ascent/descent shifts by a
+                // few percent of an em, while the standard advance widths stay exact. Applied
+                // to all four edges because rotated glyphs put that variation on the x axis.
+                const FONT_METRIC_TOLERANCE_FACTOR: f32 = 0.15;
+                const MIN_TOLERANCE: f32 = 0.5;
+                let max_font_size = fresh_block
+                    .lines
+                    .iter()
+                    .flat_map(|l| l.words.iter())
+                    .flat_map(|w| w.chars.iter())
+                    .map(|c| c.font_size)
+                    .fold(0.0_f32, f32::max);
+                let max_font_size = if max_font_size > 0.0 {
+                    max_font_size
+                } else {
+                    12.0
+                };
+                let epsilon = (FONT_METRIC_TOLERANCE_FACTOR * max_font_size).max(MIN_TOLERANCE);
+                let close = |a: f32, b: f32| (a - b).abs() <= epsilon;
+                if !(close(fresh_block.bbox.left, frozen_block.bbox.left)
+                    && close(fresh_block.bbox.bottom, frozen_block.bbox.bottom)
+                    && close(fresh_block.bbox.right, frozen_block.bbox.right)
+                    && close(fresh_block.bbox.top, frozen_block.bbox.top))
+                {
+                    mismatches.push(format!(
+                        "case {:?}, page {page_index}, block {block_index}: re-extracted bbox \
+                         {:?} drifted from the frozen snapshot's {:?} by more than {epsilon}pt -- \
+                         regenerate via `cargo run --example stage3_pdf_cases --features stage3`",
+                        case.id, fresh_block.bbox, frozen_block.bbox
+                    ));
+                }
             }
         }
     }
+
+    assert!(
+        mismatches.is_empty(),
+        "{} PDF-backed snapshot mismatch(es):\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
 }
