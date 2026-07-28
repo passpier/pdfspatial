@@ -11,10 +11,10 @@
 //! Because the heuristic only has geometry, font metrics, and text to work with, it can
 //! only ever emit the classes derivable from those signals: [`RegionClass::Title`],
 //! [`RegionClass::SectionHeader`], [`RegionClass::ListItem`], [`RegionClass::Caption`],
-//! [`RegionClass::PageHeader`], [`RegionClass::PageFooter`], and [`RegionClass::Text`].
-//! [`RegionClass::Table`], [`RegionClass::Picture`], and [`RegionClass::Formula`] require
-//! a genuine layout/vision model and are never produced here — see the module docs above
-//! for why.
+//! [`RegionClass::PageHeader`], [`RegionClass::PageFooter`], [`RegionClass::Footnote`],
+//! and [`RegionClass::Text`]. [`RegionClass::Table`], [`RegionClass::Picture`], and
+//! [`RegionClass::Formula`] require a genuine layout/vision model and are never produced
+//! here — see the module docs above for why.
 //!
 //! [`RegionClass::PageHeader`]/[`RegionClass::PageFooter`] come from two independent
 //! signals, either of which is sufficient: a single-page geometric shape test (thin
@@ -24,6 +24,14 @@
 //! [`REPEATED_BAND_MIN_PAGES`] consecutive pages — see [`repeated_running_bands`]) for
 //! running headers/footers too tall or too close to the body for the geometric rule
 //! alone to catch.
+//!
+//! [`RegionClass::Footnote`] requires three independent signals to hold at once: the
+//! block sits in the lower [`FOOTNOTE_BAND_FRACTION`] of the page, its font is smaller
+//! than the rest of the page's text (see [`body_font_size_excluding`] for why the
+//! comparison excludes the candidate block itself), and its text opens with a
+//! recognized footnote marker (a bare digit/symbol, not a bullet — see
+//! [`starts_with_footnote_marker`]). It is checked after the header/footer band rules,
+//! so a block already claimed as a running footer never also matches as a footnote.
 
 use crate::{BBox, Block, Document};
 
@@ -101,6 +109,15 @@ const REPEATED_BAND_Y_TOLERANCE: f32 = 0.02;
 
 /// A caption/list block spanning more than this many lines is treated as body text.
 const SHORT_BLOCK_MAX_LINES: usize = 2;
+
+/// A block sitting below this fraction of the page height is eligible to be a footnote --
+/// wider than [`FOOTER_BAND_FRACTION`] since footnotes commonly sit just above a running
+/// footer rather than sharing its narrow strip.
+const FOOTNOTE_BAND_FRACTION: f32 = 0.25;
+
+/// A footnote's font must be no larger than this factor of the surrounding body text's
+/// font size (see [`body_font_size_excluding`]).
+const FOOTNOTE_FONT_FACTOR: f32 = 0.95;
 
 /// Classifies every geometric [`crate::Block`] in `document` into a [`Region`], one
 /// region per block (in document order, page-major), using only heuristics over Stage
@@ -188,6 +205,15 @@ fn classify_block(
         let gap = gap_to_nearest_block(block, page_blocks, /* below */ false);
         if gap >= page_height * HEADER_FOOTER_MIN_BODY_GAP_FRACTION {
             return (RegionClass::PageFooter, 0.6);
+        }
+    }
+
+    if block.bbox.bottom <= page_height * FOOTNOTE_BAND_FRACTION
+        && starts_with_footnote_marker(&text)
+    {
+        let body_ref = body_font_size_excluding(page_blocks, block);
+        if body_ref > 0.0 && font_size <= body_ref * FOOTNOTE_FONT_FACTOR {
+            return (RegionClass::Footnote, 0.55);
         }
     }
 
@@ -347,19 +373,10 @@ fn has_consecutive_run(occurrences: &[(usize, f32)]) -> bool {
     false
 }
 
-/// The median font size across every character on the page — a cheap proxy for "body
-/// text size" that [`classify_block`] compares individual blocks against to spot
-/// oversized headings.
-fn body_median_font_size(page: &crate::Page) -> f32 {
-    let mut sizes: Vec<f32> = page
-        .blocks
-        .iter()
-        .flat_map(|b| &b.lines)
-        .flat_map(|l| &l.words)
-        .flat_map(|w| &w.chars)
-        .map(|c| c.font_size)
-        .collect();
-
+/// The median of a collection of font sizes, or `0.0` if empty. Shared by
+/// [`body_median_font_size`], [`block_font_size`], and [`body_font_size_excluding`], all
+/// of which differ only in which characters they collect sizes from.
+fn median_font_size(mut sizes: Vec<f32>) -> f32 {
     if sizes.is_empty() {
         return 0.0;
     }
@@ -368,23 +385,56 @@ fn body_median_font_size(page: &crate::Page) -> f32 {
     sizes[sizes.len() / 2]
 }
 
+/// The median font size across every character on the page — a cheap proxy for "body
+/// text size" that [`classify_block`] compares individual blocks against to spot
+/// oversized headings.
+fn body_median_font_size(page: &crate::Page) -> f32 {
+    median_font_size(
+        page.blocks
+            .iter()
+            .flat_map(|b| &b.lines)
+            .flat_map(|l| &l.words)
+            .flat_map(|w| &w.chars)
+            .map(|c| c.font_size)
+            .collect(),
+    )
+}
+
 /// The dominant font size within a single block (its own median), used to compare
 /// against the page body's median.
 fn block_font_size(block: &Block) -> f32 {
-    let mut sizes: Vec<f32> = block
-        .lines
-        .iter()
-        .flat_map(|l| &l.words)
-        .flat_map(|w| &w.chars)
-        .map(|c| c.font_size)
-        .collect();
+    median_font_size(
+        block
+            .lines
+            .iter()
+            .flat_map(|l| &l.words)
+            .flat_map(|w| &w.chars)
+            .map(|c| c.font_size)
+            .collect(),
+    )
+}
 
-    if sizes.is_empty() {
-        return 0.0;
-    }
-
-    sizes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    sizes[sizes.len() / 2]
+/// The character-weighted median font size across every *other* block on the page,
+/// excluding `block` itself.
+///
+/// [`body_median_font_size`] can't be reused for footnote detection: it's computed over
+/// the *whole* page, so a long footnote block's own small-font characters can dominate
+/// the median it's then compared against, making the block indistinguishable from "the
+/// body." Excluding the candidate block from its own reference avoids that
+/// self-domination and asks the right question -- "is this smaller than the rest of the
+/// page" -- the same `std::ptr::eq`-based exclusion [`gap_to_nearest_block`] already uses
+/// to skip comparing a block against itself.
+fn body_font_size_excluding(page_blocks: &[Block], block: &Block) -> f32 {
+    median_font_size(
+        page_blocks
+            .iter()
+            .filter(|other| !std::ptr::eq(*other, block))
+            .flat_map(|b| &b.lines)
+            .flat_map(|l| &l.words)
+            .flat_map(|w| &w.chars)
+            .map(|c| c.font_size)
+            .collect(),
+    )
 }
 
 /// Returns `true` if `text` looks like a bulleted or ordered list item: starts with a
@@ -423,6 +473,40 @@ fn is_caption(text: &str) -> bool {
         }
     }
     false
+}
+
+/// Returns `true` if `text` opens with a recognized footnote marker: a short bare digit
+/// run (optionally followed by `.` or `)`, then whitespace), a conventional footnote
+/// symbol (`*`, `†`, `‡`, `§`, `¶`), or a superscript digit (`⁰`-`⁹`). Unlike
+/// [`is_list_item`], bullet glyphs (`-`, `*` as a bullet, `•`) are deliberately *not*
+/// markers here -- `*` only counts as a footnote marker when it isn't followed by
+/// whitespace (which would instead read as a `-`/`*`/`•` bulleted list item), and `-`/`•`
+/// are never footnote markers at all.
+fn starts_with_footnote_marker(text: &str) -> bool {
+    let trimmed = text.trim_start();
+
+    if let Some(first) = trimmed.chars().next() {
+        if matches!(first, '†' | '‡' | '§' | '¶') {
+            return true;
+        }
+        if first == '*' && !trimmed[first.len_utf8()..].starts_with(char::is_whitespace) {
+            return true;
+        }
+        if ('\u{2070}'..='\u{2079}').contains(&first) {
+            return true;
+        }
+    }
+
+    let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || digits.len() > 3 {
+        return false;
+    }
+    let rest = &trimmed[digits.len()..];
+    match rest.chars().next() {
+        Some('.') | Some(')') => rest.chars().nth(1).is_some_and(char::is_whitespace),
+        Some(c) => c.is_whitespace(),
+        None => false,
+    }
 }
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
@@ -825,5 +909,207 @@ mod tests {
         for region in &regions {
             assert_eq!(region.class, RegionClass::Text);
         }
+    }
+
+    #[test]
+    fn small_marked_block_near_page_bottom_is_footnote() {
+        // Mirrors fixtures/footnote/footnote_marker_not_classified.json.
+        let body = block(vec![line(
+            "This references a footnote marker superscript.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 400.0,
+                top: 320.0,
+            },
+            10.0,
+        )]);
+        let footnote = block(vec![line(
+            "1 This is a footnote clarifying the claim above.",
+            BBox {
+                left: 40.0,
+                bottom: 90.0,
+                right: 400.0,
+                top: 105.0,
+            },
+            8.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![body, footnote])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[1].class, RegionClass::Footnote);
+    }
+
+    #[test]
+    fn footnote_just_above_footer_band_is_footnote() {
+        // Mirrors fixtures/footnote/footnote_adjacent_to_footer_band.json: the block
+        // sits above the 8%-of-800 = 64pt footer band (bottom = 70), so it's ineligible
+        // for the PageFooter geometric rule and must be caught by the footnote rule
+        // instead.
+        let body = block(vec![line(
+            "Body text referencing note two.",
+            BBox {
+                left: 40.0,
+                bottom: 200.0,
+                right: 400.0,
+                top: 220.0,
+            },
+            10.0,
+        )]);
+        let footnote = block(vec![line(
+            "2 Another footnote near the bottom margin explaining a term.",
+            BBox {
+                left: 40.0,
+                bottom: 70.0,
+                right: 400.0,
+                top: 85.0,
+            },
+            8.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![body, footnote])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[1].class, RegionClass::Footnote);
+    }
+
+    #[test]
+    fn body_font_block_near_page_bottom_is_not_footnote() {
+        // Same geometry and marker as small_marked_block_near_page_bottom_is_footnote,
+        // but body-sized font -- the font-ratio gate must reject it.
+        let body = block(vec![line(
+            "This references a footnote marker superscript.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 400.0,
+                top: 320.0,
+            },
+            10.0,
+        )]);
+        let not_footnote = block(vec![line(
+            "1 This looks like a footnote but is body-sized text.",
+            BBox {
+                left: 40.0,
+                bottom: 90.0,
+                right: 400.0,
+                top: 110.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![body, not_footnote])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[1].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn unmarked_small_block_near_page_bottom_is_not_footnote() {
+        // Same geometry and font as the footnote fixtures, but no leading marker -- the
+        // marker gate must reject it (this is just small text at the bottom of the page,
+        // not a footnote).
+        let body = block(vec![line(
+            "This references a footnote marker superscript.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 400.0,
+                top: 320.0,
+            },
+            10.0,
+        )]);
+        let not_footnote = block(vec![line(
+            "Small print near the bottom margin with no marker at all.",
+            BBox {
+                left: 40.0,
+                bottom: 90.0,
+                right: 400.0,
+                top: 105.0,
+            },
+            8.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![body, not_footnote])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[1].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn bullet_list_near_page_bottom_stays_list_item() {
+        // A bulleted list item can legitimately sit low on a small-font page -- `-`/`•`
+        // must never be treated as footnote markers.
+        let body = block(vec![line(
+            "This references a footnote marker superscript.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 400.0,
+                top: 320.0,
+            },
+            10.0,
+        )]);
+        let bullet = block(vec![line(
+            "- a small-print bullet point near the bottom margin",
+            BBox {
+                left: 40.0,
+                bottom: 90.0,
+                right: 400.0,
+                top: 105.0,
+            },
+            8.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![body, bullet])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[1].class, RegionClass::ListItem);
+    }
+
+    #[test]
+    fn footer_band_block_outranks_footnote() {
+        // A marked, small-font block inside the footer band (bottom = 20, well under the
+        // 8%-of-800 = 64pt footer band) must still resolve to PageFooter -- the footer
+        // rule is checked first, so a running footer that happens to look like a
+        // footnote is never reclassified out from under it.
+        let body = block(vec![line(
+            "Body text of the document continues here.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 560.0,
+                top: 400.0,
+            },
+            10.0,
+        )]);
+        let footer = block(vec![line(
+            "1 Legal disclaimer text repeated on every page.",
+            BBox {
+                left: 40.0,
+                bottom: 20.0,
+                right: 300.0,
+                top: 35.0,
+            },
+            8.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![body, footer])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[1].class, RegionClass::PageFooter);
     }
 }

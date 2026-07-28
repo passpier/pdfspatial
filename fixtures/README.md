@@ -117,8 +117,8 @@ Every seeded case's `expected` block states what the pipeline *should* do once S
 lands the corresponding fix -- not a snapshot of today's (wrong) output. Running
 `cargo test --features stage3 -- --ignored` executes
 `corpus_cases_meet_expected_behavior`, which is `#[ignore]`d for exactly this reason: it
-currently fails for 21 of the corpus's 26 cases, printing a scoreboard of every mismatch.
-Five cases pass today: `multi_column-wide-gutter-recovers-column-order`
+currently fails for 19 of the corpus's 26 cases, printing a scoreboard of every mismatch.
+Seven cases pass today: `multi_column-wide-gutter-recovers-column-order`
 (`fixtures/multi_column/`) is a *positive contrast* case -- its gutter is wide enough for
 `assemble::MIN_CUT_FRACTION` to fire -- and is checked unconditionally by
 `tests/stage3_corpus.rs`'s `multi_column_wide_gutter_recovers_reading_order`, not the
@@ -132,7 +132,12 @@ as its own word, so it flows through the ordinary scoreboard and simply passes. 
 well -- `layout::classify_block`'s band rule was relaxed from a hard line-count cap to a
 shape test (thin strip, detached from the body by a minimum gap), and `classify_regions`
 gained a cross-page repeated-content pass for running headers/footers too tall or too
-close to the body for the single-page geometric rule to catch on its own. That failing
+close to the body for the single-page geometric rule to catch on its own. Both `footnote`
+cases (`footnote-marker-not-classified`, `footnote-adjacent-to-footer-band`) now pass too
+-- `classify_block` gained a `Footnote` rule requiring a block to sit low on the page,
+carry a smaller font than the rest of the page (compared against a median that excludes
+the candidate block itself, so a long footnote can't inflate its own baseline), and open
+with a recognized footnote marker (a bare digit/symbol, never a bullet). That failing
 run *is* the executable Stage 3 error analysis -- re-run it after any Stage 4 heuristic
 change to see which cases flip to passing.
 

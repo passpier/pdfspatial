@@ -922,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_case_reports_mismatch_for_unfixed_footnote_pitfall() {
+    fn evaluate_case_reports_mismatch_for_footnote_inside_footer_band() {
         let dir = std::env::temp_dir().join("pdfspatial_corpus_test_evaluate_case");
         std::fs::create_dir_all(&dir).unwrap();
         let path = write_case(&dir, "case.json", MINIMAL_CASE);
@@ -930,8 +930,12 @@ mod tests {
         let case = load_case(&path).expect("case should load");
         let outcome = evaluate_case(&case);
 
-        // `classify_regions` never emits `Footnote` today, so this desired-behavior
-        // spec is expected to fail until Stage 4 adds footnote classification.
+        // `classify_regions` can emit `Footnote`, but this block's bbox (bottom = 40 of
+        // an 800pt-tall page) sits inside the footer band, so the footer-band rule --
+        // checked first -- claims it as `PageFooter` before the footnote rule ever runs.
+        // This is a real, still-open pitfall (a footnote that happens to sit low enough
+        // to look like a running footer), not the "no rule exists at all" gap this test
+        // used to document.
         assert!(!outcome.passed);
         assert_eq!(outcome.mismatches.len(), 1);
         assert!(outcome.mismatches[0].contains("class mismatch"));
