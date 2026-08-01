@@ -3,9 +3,10 @@
 //! [`assemble_reading_order`] implements the roadmap's Stage 4a reading-order fix:
 //! column-aware XY-cut recursive segmentation, replacing Stage 1's naive top-to-bottom,
 //! left-to-right block order (which is known to be wrong for multi-column layouts and
-//! several other structural patterns). It reorders each page's blocks in place; nothing
-//! about block/line/word/char content changes. Further refinement, informed by the
-//! failure taxonomy Stage 3 error analysis produces, remains future work.
+//! several other structural patterns), followed by a cross-page paragraph-stitching pass
+//! (see [`assemble_reading_order`]'s docs) that merges a sentence split across a page
+//! boundary back into one block. Further refinement, informed by the failure taxonomy
+//! Stage 3 error analysis produces, remains future work.
 //!
 //! The checklist below mirrors the roadmap's "Document-Structure Pitfall Checklist"
 //! verbatim. Each item is a category of reading-order/geometric/classification failure
@@ -47,7 +48,7 @@
 //! - [ ] **Overlapping/z-ordered text objects** — watermarks, stamps, or redaction boxes
 //!   overlapping real text and corrupting bbox clustering.
 
-use crate::{BBox, Block, Document, Page};
+use crate::{BBox, Block, Document, Line, Page};
 
 /// Root cause tag attached to each Stage 3 failure-mode regression case.
 ///
@@ -178,8 +179,61 @@ const MIN_GUTTER_ABS_PT: f32 = 2.0;
 /// page height is found, split into top/bottom groups and recurse, top before bottom.
 /// When neither cut qualifies (or only one block remains), order the blocks by
 /// descending top-y, then ascending left-x.
+///
+/// # Cross-page continuation stitching
+///
+/// After every page is independently XY-cut, a second pass walks the ordered pages and
+/// merges a page's last block into the next page's first block when they look like one
+/// paragraph split by the page boundary -- see [`stitch_cross_page_continuations`] for
+/// the exact predicate. This is the only case where content crosses a page boundary or a
+/// block's lines/words are edited rather than just reordered.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::assemble::assemble_reading_order;
+/// use pdfspatial_core::{BBox, Block, Char, Document, Line, Page, Word};
+///
+/// fn line(text: &str, bbox: BBox, font_size: f32) -> Line {
+///     let chars = vec![Char { unicode: Some('x'), bbox, font_name: "Test".into(), font_size }];
+///     let word = Word { text: text.into(), bbox, chars };
+///     Line { text: text.into(), bbox, words: vec![word] }
+/// }
+///
+/// let tail_bbox = BBox { left: 72.0, bottom: 697.5, right: 328.8, top: 710.9 };
+/// let page0 = Page {
+///     index: 0,
+///     width: 612.0,
+///     height: 792.0,
+///     blocks: vec![Block {
+///         bbox: tail_bbox,
+///         lines: vec![line("This sentence continues on the next", tail_bbox, 12.0)],
+///     }],
+/// };
+///
+/// let head_bbox = BBox { left: 72.0, bottom: 697.5, right: 307.5, top: 710.9 };
+/// let page1 = Page {
+///     index: 1,
+///     width: 612.0,
+///     height: 792.0,
+///     blocks: vec![Block {
+///         bbox: head_bbox,
+///         lines: vec![line("page without a heading to signal a restart.", head_bbox, 12.0)],
+///     }],
+/// };
+///
+/// let document = Document { pages: vec![page0, page1] };
+/// let assembled = assemble_reading_order(&document);
+///
+/// assert_eq!(assembled.pages[0].blocks.len(), 1);
+/// assert_eq!(
+///     assembled.pages[0].blocks[0].text(),
+///     "This sentence continues on the next page without a heading to signal a restart."
+/// );
+/// assert!(assembled.pages[1].blocks.is_empty());
+/// ```
 pub fn assemble_reading_order(document: &Document) -> Document {
-    let pages = document
+    let mut pages: Vec<Page> = document
         .pages
         .iter()
         .map(|page| {
@@ -194,6 +248,8 @@ pub fn assemble_reading_order(document: &Document) -> Document {
             }
         })
         .collect();
+
+    stitch_cross_page_continuations(&mut pages);
 
     Document { pages }
 }
@@ -392,6 +448,253 @@ fn center_x(bbox: BBox) -> f32 {
 
 fn center_y(bbox: BBox) -> f32 {
     (bbox.top + bbox.bottom) / 2.0
+}
+
+// --- Cross-page continuation stitching --------------------------------------------
+
+/// A left-edge (indentation) mismatch smaller than this, expressed as a multiple of the
+/// blocks' own font size, is not considered evidence the blocks are a different column
+/// or a differently indented paragraph -- see [`left_edges_align`].
+const STITCH_LEFT_ALIGN_EMS: f32 = 1.0;
+
+/// Absolute floor for [`STITCH_LEFT_ALIGN_EMS`], in points, so a pathologically tiny
+/// font size can't shrink the left-alignment tolerance to near zero.
+const STITCH_LEFT_ALIGN_ABS_PT: f32 = 3.0;
+
+/// Maximum relative difference between two blocks' median font sizes for them to still
+/// be considered the same running paragraph -- see [`font_sizes_similar`].
+const STITCH_FONT_SIZE_TOLERANCE: f32 = 0.15;
+
+/// Tolerance, in points, for treating a block's bbox edge as *the* extreme edge on its
+/// page (see [`is_page_bottom`]/[`is_page_top`]), to absorb float round-off from
+/// extraction rather than requiring bit-exact equality.
+const STITCH_EDGE_EPSILON_PT: f32 = 0.5;
+
+/// Walks `pages` in document order and merges a page's last-in-reading-order block into
+/// the next page's first-in-reading-order block wherever [`should_stitch`] says they
+/// look like one paragraph split by the page boundary -- the Stage 4a fix for the
+/// `CrossPageContinuation` pitfall (roadmap: "Cross-page stitching via
+/// bottom-of-page/top-of-next-page bbox adjacency + incomplete-sentence detection").
+///
+/// `left` deliberately does *not* always advance to `right`: when a stitch happens, the
+/// merged content now lives in page `left`'s block, so a paragraph spanning three or
+/// more pages keeps extending that same block instead of losing the chain the moment an
+/// intermediate page is emptied out.
+fn stitch_cross_page_continuations(pages: &mut [Page]) {
+    if pages.len() < 2 {
+        return;
+    }
+
+    let mut left = 0usize;
+    for right in 1..pages.len() {
+        let (left_slice, right_slice) = pages.split_at_mut(right);
+        let left_page = &mut left_slice[left];
+        let right_page = &mut right_slice[0];
+
+        let Some(tail_idx) = left_page.blocks.len().checked_sub(1) else {
+            left = right;
+            continue;
+        };
+        if right_page.blocks.is_empty() {
+            left = right;
+            continue;
+        }
+
+        let stitch = should_stitch(
+            left_page,
+            &left_page.blocks[tail_idx],
+            right_page,
+            &right_page.blocks[0],
+        );
+
+        if stitch {
+            let head_block = right_page.blocks.remove(0);
+            let merged = merge_blocks(&left_page.blocks[tail_idx], &head_block);
+            left_page.blocks[tail_idx] = merged;
+            // `left` stays put -- see doc comment above.
+        } else {
+            left = right;
+        }
+    }
+}
+
+/// `true` if `tail_block` (the last block, in reading order, of `tail_page`) and
+/// `head_block` (the first block, in reading order, of `head_page`) look like a single
+/// paragraph split by the page boundary between them:
+///
+/// - `tail_block` sits at the bottom of its own page's content and `head_block` sits at
+///   the top of its own page's content ([`is_page_bottom`]/[`is_page_top`]) -- expressed
+///   relative to the page's *own* content rather than a fixed physical margin, so it
+///   fires even when the split line sits far from the physical page edge (e.g. a mostly
+///   blank page).
+/// - The two blocks share a left edge, within [`STITCH_LEFT_ALIGN_EMS`]
+///   ([`left_edges_align`]) -- rules out a different column or a differently indented
+///   paragraph.
+/// - The two blocks' font sizes are close, within [`STITCH_FONT_SIZE_TOLERANCE`]
+///   ([`font_sizes_similar`]) -- rules out gluing body text to a running
+///   header/footer/caption of a different size.
+/// - `tail_block`'s last line does not end in sentence-final punctuation, and
+///   `head_block`'s first line starts with a lowercase letter -- the incomplete-sentence
+///   signal the roadmap calls for, and specifically what keeps a new heading, a running
+///   header, or a bulleted/numbered list item on the next page from being swallowed into
+///   the previous page's last paragraph.
+fn should_stitch(
+    tail_page: &Page,
+    tail_block: &Block,
+    head_page: &Page,
+    head_block: &Block,
+) -> bool {
+    let (Some(tail_line), Some(head_line)) = (tail_block.lines.last(), head_block.lines.first())
+    else {
+        return false;
+    };
+
+    is_page_bottom(tail_page, tail_block)
+        && is_page_top(head_page, head_block)
+        && left_edges_align(tail_block, head_block)
+        && font_sizes_similar(tail_block, head_block)
+        && !ends_with_sentence_final_punct(&tail_line.text)
+        && starts_with_lowercase_letter(&head_line.text)
+}
+
+/// `true` if no other block on `page` has a lower `bbox.bottom` than `block`'s, i.e.
+/// `block` is (one of) the bottom-most block(s) on its page -- see
+/// [`STITCH_EDGE_EPSILON_PT`] for the tolerance.
+fn is_page_bottom(page: &Page, block: &Block) -> bool {
+    let min_bottom = page
+        .blocks
+        .iter()
+        .fold(f32::INFINITY, |acc, b| acc.min(b.bbox.bottom));
+    block.bbox.bottom <= min_bottom + STITCH_EDGE_EPSILON_PT
+}
+
+/// `true` if no other block on `page` has a higher `bbox.top` than `block`'s, i.e.
+/// `block` is (one of) the top-most block(s) on its page. Mirrors [`is_page_bottom`].
+fn is_page_top(page: &Page, block: &Block) -> bool {
+    let max_top = page
+        .blocks
+        .iter()
+        .fold(f32::NEG_INFINITY, |acc, b| acc.max(b.bbox.top));
+    block.bbox.top >= max_top - STITCH_EDGE_EPSILON_PT
+}
+
+/// `true` if `tail`'s and `head`'s left edges differ by no more than
+/// [`STITCH_LEFT_ALIGN_EMS`] times whichever block has font-size data available
+/// (clamped to [`STITCH_LEFT_ALIGN_ABS_PT`]), falling back to a plain 12pt em if neither
+/// block carries character data (e.g. a hand-built test fixture with empty lines).
+fn left_edges_align(tail: &Block, head: &Block) -> bool {
+    let em = block_font_size(tail)
+        .or_else(|| block_font_size(head))
+        .unwrap_or(12.0);
+    let threshold = (STITCH_LEFT_ALIGN_EMS * em).max(STITCH_LEFT_ALIGN_ABS_PT);
+    (tail.bbox.left - head.bbox.left).abs() <= threshold
+}
+
+/// `true` if `tail`'s and `head`'s median font sizes are within
+/// [`STITCH_FONT_SIZE_TOLERANCE`] of each other, or if either block has no character
+/// data to measure a font size from (nothing to contradict a match).
+fn font_sizes_similar(tail: &Block, head: &Block) -> bool {
+    match (block_font_size(tail), block_font_size(head)) {
+        (Some(a), Some(b)) => {
+            let diff = (a - b).abs();
+            diff / a.max(b).max(f32::EPSILON) <= STITCH_FONT_SIZE_TOLERANCE
+        }
+        _ => true,
+    }
+}
+
+/// Returns the median `font_size` across every [`crate::Char`] in `block`, or `None` if
+/// the block has no characters to measure -- the block-scoped counterpart of
+/// [`median_font_size`], used to compare two blocks' text scale directly rather than
+/// against a whole page's.
+fn block_font_size(block: &Block) -> Option<f32> {
+    let mut sizes: Vec<f32> = block
+        .lines
+        .iter()
+        .flat_map(|l| &l.words)
+        .flat_map(|w| &w.chars)
+        .map(|c| c.font_size)
+        .collect();
+
+    if sizes.is_empty() {
+        return None;
+    }
+
+    sizes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(sizes[sizes.len() / 2])
+}
+
+/// `true` if `text`, right-trimmed, ends in a character that plausibly closes a
+/// sentence (or a quotation/parenthetical following one) -- the guard against stitching
+/// a genuinely finished paragraph into whatever starts the next page.
+fn ends_with_sentence_final_punct(text: &str) -> bool {
+    const TERMINATORS: &[char] = &['.', '!', '?', ':', ';', '"', '\'', ')', '»', '”'];
+    matches!(text.trim_end().chars().last(), Some(c) if TERMINATORS.contains(&c))
+}
+
+/// `true` if `text`, left-trimmed, starts with a lowercase letter -- the
+/// incomplete-sentence signal that a stitch candidate is a continuation rather than a
+/// new heading, running header, or list item (which conventionally start uppercase,
+/// with a digit, or with a bullet glyph).
+fn starts_with_lowercase_letter(text: &str) -> bool {
+    text.trim_start()
+        .chars()
+        .next()
+        .is_some_and(char::is_lowercase)
+}
+
+/// Merges `head` into `tail`, joining their last/first lines into one line (see
+/// [`join_with_dehyphenation`]) and keeping `tail`'s bbox -- a cross-page union would be
+/// geometrically meaningless, and holding it steady keeps
+/// [`crate::serialize::to_markdown_structured`]'s bbox-equality region lookup working
+/// for the merged block.
+fn merge_blocks(tail: &Block, head: &Block) -> Block {
+    let mut lines = tail.lines.clone();
+    // Checked non-empty by `should_stitch` before this is called.
+    let tail_last = lines
+        .pop()
+        .expect("should_stitch checked tail has a last line");
+    let head_first = head
+        .lines
+        .first()
+        .expect("should_stitch checked head has a first line");
+
+    let mut words = tail_last.words.clone();
+    words.extend(head_first.words.iter().cloned());
+    lines.push(Line {
+        text: join_with_dehyphenation(&tail_last.text, &head_first.text),
+        bbox: tail_last.bbox,
+        words,
+    });
+    lines.extend(head.lines[1..].iter().cloned());
+
+    Block {
+        bbox: tail.bbox,
+        lines,
+    }
+}
+
+/// Joins `tail_text` and `head_text` with a single space, unless `tail_text` ends in a
+/// hyphen immediately preceded by a letter, in which case the hyphen is dropped and the
+/// two are joined directly -- standard end-of-line-hyphenation reversal.
+fn join_with_dehyphenation(tail_text: &str, head_text: &str) -> String {
+    let trimmed_tail = tail_text.trim_end();
+    let head_text = head_text.trim_start();
+
+    if let Some(stripped) = trimmed_tail
+        .strip_suffix('-')
+        .or_else(|| trimmed_tail.strip_suffix('\u{2010}'))
+    {
+        if stripped
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphabetic)
+        {
+            return format!("{stripped}{head_text}");
+        }
+    }
+
+    format!("{trimmed_tail} {head_text}")
 }
 
 #[cfg(test)]
@@ -674,5 +977,275 @@ mod tests {
 
         assert_eq!(blocks[0].bbox, top_left.bbox);
         assert_eq!(blocks[1].bbox, bottom_right.bbox);
+    }
+
+    // --- Cross-page continuation stitching ------------------------------------
+
+    /// Builds a one-line block with real text and character data at `font_size`, so
+    /// text-content predicates ([`ends_with_sentence_final_punct`],
+    /// [`starts_with_lowercase_letter`]) and font-size predicates
+    /// ([`font_sizes_similar`], [`left_edges_align`]) both have something to key off,
+    /// unlike [`block`]/[`block_with_font`]'s placeholder `"line"` text.
+    fn text_block(text: &str, bbox: BBox, font_size: f32) -> Block {
+        let chars: Vec<Char> = text
+            .chars()
+            .map(|c| Char {
+                unicode: Some(c),
+                bbox,
+                font_name: "Test".into(),
+                font_size,
+            })
+            .collect();
+        let word = Word {
+            text: text.into(),
+            bbox,
+            chars,
+        };
+        Block {
+            bbox,
+            lines: vec![Line {
+                text: text.into(),
+                bbox,
+                words: vec![word],
+            }],
+        }
+    }
+
+    fn page_of(index: usize, blocks: Vec<Block>) -> Page {
+        Page {
+            index,
+            width: 612.0,
+            height: 792.0,
+            blocks,
+        }
+    }
+
+    #[test]
+    fn continuation_split_across_two_pages_is_stitched_into_one_block() {
+        let tail_bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 328.8,
+            top: 710.9,
+        };
+        let head_bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 307.5,
+            top: 710.9,
+        };
+        let page0 = page_of(
+            0,
+            vec![text_block(
+                "This sentence continues on the next",
+                tail_bbox,
+                12.0,
+            )],
+        );
+        let page1 = page_of(
+            1,
+            vec![text_block(
+                "page without a heading to signal a restart.",
+                head_bbox,
+                12.0,
+            )],
+        );
+
+        let doc = Document {
+            pages: vec![page0, page1],
+        };
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks.len(), 1);
+        assert_eq!(
+            assembled.pages[0].blocks[0].text(),
+            "This sentence continues on the next page without a heading to signal a restart."
+        );
+        assert!(assembled.pages[1].blocks.is_empty());
+    }
+
+    #[test]
+    fn continuation_chains_across_three_pages() {
+        // Each page's block continues into the next; the merge should keep extending
+        // page 0's block rather than losing the chain once page 1 is emptied out.
+        let bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 328.8,
+            top: 710.9,
+        };
+        let doc = Document {
+            pages: vec![
+                page_of(0, vec![text_block("one two three", bbox, 12.0)]),
+                page_of(1, vec![text_block("four five six", bbox, 12.0)]),
+                page_of(2, vec![text_block("seven eight nine.", bbox, 12.0)]),
+            ],
+        };
+
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks.len(), 1);
+        assert_eq!(
+            assembled.pages[0].blocks[0].text(),
+            "one two three four five six seven eight nine."
+        );
+        assert!(assembled.pages[1].blocks.is_empty());
+        assert!(assembled.pages[2].blocks.is_empty());
+    }
+
+    #[test]
+    fn hyphenated_line_break_is_dehyphenated_on_stitch() {
+        let bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 328.8,
+            top: 710.9,
+        };
+        let doc = Document {
+            pages: vec![
+                page_of(0, vec![text_block("a hyphen-", bbox, 12.0)]),
+                page_of(1, vec![text_block("ated word.", bbox, 12.0)]),
+            ],
+        };
+
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks[0].text(), "a hyphenated word.");
+    }
+
+    #[test]
+    fn finished_sentence_is_not_stitched_to_next_page() {
+        // Tail ends in a period -- a complete sentence, not a split one.
+        let bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 328.8,
+            top: 710.9,
+        };
+        let doc = Document {
+            pages: vec![
+                page_of(0, vec![text_block("A finished sentence.", bbox, 12.0)]),
+                page_of(1, vec![text_block("a new paragraph starts.", bbox, 12.0)]),
+            ],
+        };
+
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks.len(), 1);
+        assert_eq!(assembled.pages[1].blocks.len(), 1);
+    }
+
+    #[test]
+    fn capitalized_next_page_start_is_not_stitched() {
+        // Head starts uppercase -- looks like a new sentence/heading, not a
+        // continuation, even though the tail doesn't end in terminal punctuation.
+        let bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 328.8,
+            top: 710.9,
+        };
+        let doc = Document {
+            pages: vec![
+                page_of(0, vec![text_block("An unfinished lead-in", bbox, 12.0)]),
+                page_of(1, vec![text_block("New Section Heading", bbox, 12.0)]),
+            ],
+        };
+
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks.len(), 1);
+        assert_eq!(assembled.pages[1].blocks.len(), 1);
+    }
+
+    #[test]
+    fn mismatched_left_edge_is_not_stitched() {
+        let tail_bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 328.8,
+            top: 710.9,
+        };
+        let head_bbox = BBox {
+            left: 200.0,
+            bottom: 697.5,
+            right: 450.0,
+            top: 710.9,
+        };
+        let doc = Document {
+            pages: vec![
+                page_of(0, vec![text_block("indented differently", tail_bbox, 12.0)]),
+                page_of(1, vec![text_block("on the next page", head_bbox, 12.0)]),
+            ],
+        };
+
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks.len(), 1);
+        assert_eq!(assembled.pages[1].blocks.len(), 1);
+    }
+
+    #[test]
+    fn mismatched_font_size_is_not_stitched() {
+        let bbox = BBox {
+            left: 72.0,
+            bottom: 697.5,
+            right: 328.8,
+            top: 710.9,
+        };
+        let doc = Document {
+            pages: vec![
+                page_of(0, vec![text_block("a body paragraph that", bbox, 10.0)]),
+                page_of(1, vec![text_block("running header text", bbox, 22.0)]),
+            ],
+        };
+
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks.len(), 1);
+        assert_eq!(assembled.pages[1].blocks.len(), 1);
+    }
+
+    #[test]
+    fn header_footer_repeated_across_pages_is_not_stitched() {
+        // Regression guard for the header_footer corpus case's shape: a short,
+        // uppercase-starting running header sits at the top of each page, and body
+        // text (ending in a period) sits lower. Neither the header-to-header nor the
+        // body-to-header pairing should stitch.
+        let header_bbox = BBox {
+            left: 40.0,
+            bottom: 760.0,
+            right: 300.0,
+            top: 775.0,
+        };
+        let body_bbox = BBox {
+            left: 40.0,
+            bottom: 300.0,
+            right: 560.0,
+            top: 755.0,
+        };
+        let doc = Document {
+            pages: vec![
+                page_of(
+                    0,
+                    vec![
+                        text_block("Chapter 4: Results", header_bbox, 10.0),
+                        text_block("Body text for page one.", body_bbox, 10.0),
+                    ],
+                ),
+                page_of(
+                    1,
+                    vec![
+                        text_block("Chapter 4: Results", header_bbox, 10.0),
+                        text_block("Body text for page two.", body_bbox, 10.0),
+                    ],
+                ),
+            ],
+        };
+
+        let assembled = assemble_reading_order(&doc);
+
+        assert_eq!(assembled.pages[0].blocks.len(), 2);
+        assert_eq!(assembled.pages[1].blocks.len(), 2);
     }
 }
