@@ -96,7 +96,7 @@ lives in [`docs/pitfall_registry.json`](pitfall_registry.json) and is merged in 
 same generator; only the counts and pass/fail markers are re-derived every run.
 
 <!-- BEGIN GENERATED: pitfall-checklist -->
-Status reflects the Stage 3 regression corpus under [`fixtures/`](../fixtures) — run `cargo run --example stage3_scoreboard --features stage3` for the live scoreboard (currently 14/26 cases passing); see [`fixtures/README.md`](../fixtures/README.md) for per-case detail.
+Status reflects the Stage 3 regression corpus under [`fixtures/`](../fixtures) — run `cargo run --example stage3_scoreboard --features stage3` for the live scoreboard (currently 15/26 cases passing); see [`fixtures/README.md`](../fixtures/README.md) for per-case detail.
 
 - [x] **Multi-column layout / gutter detection** — text lines merged across column boundaries, or column order inverted (right column read before left) *(3 cases, `ordering`; 3/3 passing — assemble::assemble_reading_order's XY-cut now qualifies a vertical gutter against the page's own median character size (MIN_GUTTER_EMS), not just a fixed page-width fraction (MIN_CUT_FRACTION), so narrow (1 em) column gutters recover column-major order the same way wide ones already did)*
 - [~] **Footnotes** — footnote text merged into body `Text` region instead of classified as `Footnote`; footnote markers (superscript numerals) not linked to their note *(2 cases, `classification`; 2/2 passing — classified via layout::classify_block's footnote rule (requires a block to sit low on the page, carry a smaller font than the rest of the page, and open with a recognized footnote marker) -- but serialize::render_block has no Footnote arm yet, so marker-to-note linking/rendering is still open)*
@@ -106,7 +106,7 @@ Status reflects the Stage 3 regression corpus under [`fixtures/`](../fixtures) �
 - [ ] **Borderless / whitespace-delimited tables** — no ruling lines for the layout model to key off; frequently misclassified as plain `Text` *(2 cases, `classification`; 0/2 passing)*
 - [ ] **Nested mathematical formulas** — inline formulas embedded mid-sentence not separated from surrounding text; multi-line/stacked formulas (fractions, summations, matrices) fragmented into multiple bounding boxes *(2 cases, `classification`; 0/2 passing)*
 - [x] **Superscript/subscript handling** — footnote markers, exponents, and chemical/math subscripts causing baseline-clustering errors in Stage 1's line grouping *(1 case, `geometric`; 1/1 passing — extract::group_words's is_script_continuation check now recognizes a smaller, baseline-offset, nearby character as a super/subscript of its predecessor and attaches it to its base instead of splitting it off)*
-- [ ] **Rotated or vertical text** — sidebar labels, rotated table headers, CJK vertical text (relevant given Traditional Chinese/Japanese document support) *(1 case, `geometric`; 0/1 passing)*
+- [x] **Rotated or vertical text** — sidebar labels, rotated table headers, CJK vertical text (relevant given Traditional Chinese/Japanese document support) *(1 case, `geometric`; 1/1 passing)*
 - [ ] **Figure/caption association** — captions not correctly linked to their parent `Picture`/`Table` region, or associated with the wrong figure when multiple figures share a page *(2 cases, `classification`; 0/2 passing — layout::is_caption covers the caption half, but no code path emits RegionClass::Picture)*
 - [~] **List-item nesting** — multi-level bullet/numbered lists collapsed into flat `List-item` blocks, losing hierarchy *(2 cases, `ordering`; 2/2 passing — reading order now passes after the narrow-gutter fix shared with multi-column above -- each side-by-side outline is read fully before the next; hierarchy/depth itself is still not modeled, so nested lists still flatten into one flat sequence)*
 - [x] **Cross-page table/paragraph continuation** — tables or paragraphs split across a page boundary not stitched back together *(1 case, `ordering`; 1/1 passing)*
@@ -142,7 +142,7 @@ scale.
 | Regression corpus size per category | Ensures Stage 4 fixes are validated, not just anecdotal |
 
 **Exit criterion:** Every pitfall category above has a labeled regression corpus and a root-cause tag; failure counts are ranked to define the Stage 4 priority order. <!-- BEGIN GENERATED: pitfall-exit-criterion -->
-**Met** — all 15 pitfalls are seeded in the corpus with a root-cause tag and a live pass/fail scoreboard (14/26 cases passing today, 11 pitfalls blocked on a named prerequisite above); the one open gap is volume — each category has 1–3 cases, short of the ≥ 20-samples-per-category target, which needs a real DocLayNet mining pass to close.
+**Met** — all 15 pitfalls are seeded in the corpus with a root-cause tag and a live pass/fail scoreboard (15/26 cases passing today, 11 pitfalls blocked on a named prerequisite above); the one open gap is volume — each category has 1–3 cases, short of the ≥ 20-samples-per-category target, which needs a real DocLayNet mining pass to close.
 <!-- END GENERATED: pitfall-exit-criterion -->
 
 ---
@@ -195,7 +195,7 @@ After Stage 4, re-run the **full Stage 2 validation suite** on a fresh DocLayNet
 | 1. Baseline | Char recall, line-grouping accuracy, throughput | ≥99% recall, ≥95% line accuracy |
 | 2. Validation | TEDS-Struct, TEDS, TEDS(IOU), mean GIoU, region F1 | ≥0.90 TEDS-Struct, ≥0.75 GIoU, ≥0.85 macro-F1 |
 <!-- BEGIN GENERATED: pitfall-dashboard-row -->
-| 3. Error Analysis | Failure count/category, root-cause split | Full pitfall-checklist coverage — **met**: 15/15 pitfalls seeded, root-cause-tagged, scoreboard-tracked (14/26 cases passing); ≥20-samples/category volume still outstanding |
+| 3. Error Analysis | Failure count/category, root-cause split | Full pitfall-checklist coverage — **met**: 15/15 pitfalls seeded, root-cause-tagged, scoreboard-tracked (15/26 cases passing); ≥20-samples/category volume still outstanding |
 <!-- END GENERATED: pitfall-dashboard-row -->
 | 4. Refinement | Per-class GIoU/F1 delta, regression pass rate, throughput delta | 100% regression pass, <10% latency cost |
 

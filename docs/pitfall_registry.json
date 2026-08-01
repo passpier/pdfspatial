@@ -66,11 +66,7 @@
   "rotated_text": {
     "title": "Rotated or vertical text",
     "summary": "sidebar labels, rotated table headers, CJK vertical text (relevant given Traditional Chinese/Japanese document support)",
-    "blocked": {
-      "reason": "Stage 1 extraction gaps (`requires_extraction_fix`)",
-      "unblocked_by": "Read PDFium's rotation matrix / encoding table / z-order in `extract.rs`",
-      "loop_refuses": false
-    },
+    "note": "Handles 90-degree-rotated Latin runs (sidebar labels) via extract::merge_rotated_text_runs. CJK vertical writing mode and rotated table headers are still unhandled.",
     "pdf_backed_reason": "Needs real glyph rotation data from PDFium's text layer."
   },
   "figure_caption": {

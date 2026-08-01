@@ -153,6 +153,13 @@ const MIN_GUTTER_ABS_PT: f32 = 2.0;
 /// Reassembles a [`Document`]'s blocks into reading order via recursive, column-aware
 /// XY-cut segmentation, replacing Stage 1's naive top-to-bottom scan.
 ///
+/// Before the XY-cut, each page's blocks pass through
+/// [`crate::extract::merge_rotated_text_runs`], which repairs rotated/vertical text that
+/// Stage 1's baseline clustering shatters into one line per glyph. This is the only place
+/// besides cross-page stitching (below) where a block's lines/words are rebuilt rather
+/// than just reordered; block bounding boxes are unchanged, so it never affects which cut
+/// the XY-cut algorithm makes.
+///
 /// # Why this takes a [`Document`], not `&[Region]`
 ///
 /// The roadmap's original stub signature was `fn(&[Region]) -> Document`, but
@@ -237,7 +244,10 @@ pub fn assemble_reading_order(document: &Document) -> Document {
         .pages
         .iter()
         .map(|page| {
-            let mut blocks = page.blocks.clone();
+            // Repair rotated/vertical text before ordering: Stage 1's center-y line
+            // grouping shatters a rotated label into one line per glyph, and neither the
+            // XY-cut nor the cross-page stitcher below can put those back together.
+            let mut blocks = crate::extract::merge_rotated_text_runs(&page.blocks);
             let params = CutParams::for_page(page);
             xy_cut_order(&mut blocks, &params);
             Page {

@@ -412,6 +412,15 @@ pub fn minimize_reorder_repro(page: &Page) -> Option<ReproMinimization> {
 
 /// `true` if [`assemble_reading_order`] changes `blocks`' text order at all, i.e. the
 /// reordering predicate [`minimize_reorder_repro`]'s greedy shrink preserves.
+///
+/// Note: this compares block *text* before and after assembly, on the assumption that
+/// assembly only reorders blocks. [`assemble_reading_order`] also runs
+/// [`crate::extract::merge_rotated_text_runs`], which can rewrite a block's text (merging
+/// a rotated run of lines) without moving the block at all. That pass is structurally
+/// inert on DocLayNet-derived pages (each block there is already one line), so it cannot
+/// affect this function today -- but a future caller feeding multi-line blocks through
+/// `reorders`/[`minimize_reorder_repro`] should not assume a `true`/nonzero result means
+/// the blocks moved.
 fn reorders(blocks: &[Block], page_width: f32, page_height: f32) -> bool {
     if blocks.is_empty() {
         return false;

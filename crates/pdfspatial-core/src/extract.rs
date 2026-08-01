@@ -85,6 +85,58 @@ const SCRIPT_BASELINE_OFFSET_FACTOR: f32 = 0.15;
 /// because scripts are positioned typographically rather than by advance width.
 const SCRIPT_GAP_FACTOR: f32 = 0.75;
 
+/// A run of at least this many consecutive one-glyph-per-line entries is required before
+/// [`merge_rotated_text_runs`] treats them as one rotated text line. Two stacked short
+/// entries alone are ambiguous with a narrow, wrapped table cell; three is the shortest
+/// run no horizontal layout plausibly produces.
+const MIN_ROTATED_RUN_LINES: usize = 3;
+
+/// The widest a line may be, as a multiple of its font size, to be a candidate rotated
+/// glyph. A 90-degree-rotated glyph's page-space *width* is the glyph box's *height*
+/// (loose bounds run roughly ascent 0.905 + descent 0.212 em), so this needs headroom
+/// above 1 em but must stay well under the ~2 em a two-character horizontal word occupies.
+const ROTATED_LINE_MAX_WIDTH_EMS: f32 = 1.5;
+
+/// The tallest a line may be, as a multiple of its font size, to be a candidate rotated
+/// glyph. A rotated glyph's page-space *height* is its advance width, which tops out just
+/// under 1 em for Latin text (a wide capital like `W` is ~0.94 em) and around 1 em for
+/// full-width CJK. This is a ceiling that ends a run at a genuinely horizontal line, not a
+/// strong discriminator on its own.
+const ROTATED_GLYPH_MAX_HEIGHT_EMS: f32 = 1.0;
+
+/// Two lines in a rotated run must share both left and right edges to within this
+/// multiple of the font size. Every glyph of one rotated line is drawn at the same `x`,
+/// so a genuine run's boxes form a perfect column; requiring *both* edges (not just
+/// `left`) is what rejects a left-aligned column of short horizontal entries whose
+/// widths -- and therefore right edges -- differ.
+const ROTATED_COLUMN_X_TOLERANCE_EMS: f32 = 0.25;
+
+/// Consecutive glyph boxes whose signed vertical gap is within this multiple of the font
+/// size are "abutting" -- adjacent glyphs of the same word. Rotated glyph boxes tile the
+/// baseline almost exactly (float noise of a few hundredths of a point at typical sizes),
+/// so this is deliberately far below [`WORD_GAP_FACTOR`] -- large enough to swallow that
+/// noise, small enough to leave a real inter-word space (about a quarter em) on the other
+/// side of the gap.
+const ROTATED_GLYPH_ABUT_EMS: f32 = 0.05;
+
+/// The largest signed vertical gap, as a multiple of the font size, that a rotated run may
+/// step across without breaking. A single space in a rotated label is one glyph's space
+/// advance (about a quarter em); this leaves slack above that without being wide enough to
+/// admit a second, structurally separate label stacked above the first.
+const ROTATED_RUN_MAX_GAP_EMS: f32 = 0.40;
+
+/// The minimum fraction of a run's internal gaps that must be "abutting" (see
+/// [`ROTATED_GLYPH_ABUT_EMS`]) for the run to be accepted. In a rotated label most gaps
+/// are ~0 and only word breaks are wide; in a stack of separate horizontal lines (for
+/// example a leaded numeric column), by contrast, *every* gap is the line leading, so none
+/// are abutting. This is what tells the two apart when column alignment alone cannot.
+const ROTATED_RUN_MIN_ABUTTING_FRACTION: f32 = 0.5;
+
+/// The most characters a line may carry and still be a candidate rotated glyph. Usually
+/// exactly one; occasionally PDFium's own baseline clustering merges two adjacent rotated
+/// glyphs whose page-space boxes overlap enough to pass [`group_lines`]'s test.
+const ROTATED_LINE_MAX_CHARS: usize = 2;
+
 /// Where to obtain the native PDFium library from.
 ///
 /// `pdfium-render` binds to PDFium at run time rather than linking it statically, so this
@@ -276,6 +328,239 @@ pub fn group_chars_into_blocks(chars: &[Char]) -> Vec<Block> {
     let words = group_words(chars);
     let lines = group_lines(words);
     group_blocks(lines)
+}
+
+/// Repairs rotated or vertical text that [`group_lines`]' baseline clustering shattered.
+///
+/// [`group_lines`] clusters words by vertical center, on the assumption that a text line
+/// is wide and flat. A 90-degree-rotated run of text (a sidebar label, a rotated table
+/// header) violates that assumption: PDFium reports each rotated glyph's own tall, narrow
+/// page-space bounding box, so `group_lines` opens a new line for nearly every glyph
+/// instead of recognizing one continuous label. This function is the repair pass: it looks
+/// for a maximal run of consecutive one-or-two-character lines, within a single [`Block`],
+/// that forms a tight, axis-aligned column, and merges each such run back into one
+/// horizontal [`Line`] -- splitting it into words wherever a run's internal gap is large
+/// enough to be a real inter-word space rather than adjacent-glyph tiling.
+///
+/// This is a separate pass from [`group_chars_into_blocks`], not a change to it: the
+/// per-glyph boxes `group_lines` produces are what PDFium actually reports, and other
+/// tooling (regression snapshots, character-recall metrics) depends on that being
+/// reproducible. This function only runs later, over the pipeline's already-grouped
+/// blocks.
+///
+/// # Reading direction
+///
+/// `Line`/`Char` carry bounding boxes but no text matrix, so a rotation's *sign* -- 90
+/// degrees counter-clockwise (read bottom-to-top) versus 90 degrees clockwise (read
+/// top-to-bottom) -- is not recoverable from geometry alone: both produce an identical
+/// column of stacked glyph boxes. This function does not guess from geometry. It
+/// concatenates a run in the order its lines already appear in `block.lines`, which is
+/// PDFium's content-stream order -- the order the glyphs were *shown*, and therefore the
+/// logical reading order under either text matrix. The run is still required to be
+/// monotonically stacked in `y` (see below), but only to confirm it *is* a rotated run;
+/// that check never decides which way to read it. The one case this cannot rescue is a PDF
+/// that emits a rotated label's glyphs out of logical order, which is indistinguishable
+/// from a correctly ordered one without the text matrix.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::{BBox, Block, Char, Line, Word};
+/// use pdfspatial_core::extract::merge_rotated_text_runs;
+///
+/// // One rotated glyph: page-space width is roughly the glyph box's height (~1.1 em),
+/// // and page-space height is the glyph's own advance width.
+/// fn glyph(ch: char, bottom: f32, top: f32) -> Line {
+///     let bbox = BBox { left: 550.95, bottom, right: 562.11, top };
+///     let c = Char {
+///         unicode: Some(ch),
+///         bbox,
+///         font_name: "Helvetica".to_string(),
+///         font_size: 10.0,
+///     };
+///     let word = Word { text: ch.to_string(), bbox, chars: vec![c] };
+///     Line { text: ch.to_string(), bbox, words: vec![word] }
+/// }
+///
+/// // "ABC D", stacked bottom-to-top in the order PDFium emitted the glyphs, with a
+/// // space-sized gap (2.78 pt, Helvetica's space advance at 10 pt) before the "D".
+/// let lines = vec![
+///     glyph('A', 620.00, 626.67),
+///     glyph('B', 626.67, 633.34),
+///     glyph('C', 633.34, 640.01),
+///     glyph('D', 642.79, 650.01),
+/// ];
+/// let bbox = BBox { left: 550.95, bottom: 620.0, right: 562.11, top: 650.01 };
+/// let block = Block { bbox, lines };
+///
+/// let merged = merge_rotated_text_runs(std::slice::from_ref(&block));
+///
+/// assert_eq!(merged[0].lines.len(), 1);
+/// assert_eq!(merged[0].text(), "ABC D");
+///
+/// // Ordinary horizontal text is left exactly as it was.
+/// let wide = BBox { left: 72.0, bottom: 700.0, right: 400.0, top: 712.0 };
+/// let plain = Block { bbox: wide, lines: vec![glyph('x', 700.0, 712.0)] };
+/// assert_eq!(merge_rotated_text_runs(std::slice::from_ref(&plain)), vec![plain]);
+/// ```
+pub fn merge_rotated_text_runs(blocks: &[Block]) -> Vec<Block> {
+    blocks
+        .iter()
+        .map(|block| Block {
+            bbox: block.bbox,
+            lines: merge_rotated_runs_in_block(&block.lines),
+        })
+        .collect()
+}
+
+/// The candidacy test for one line: is it plausibly a single rotated glyph (or the
+/// occasional PDFium-merged pair)? Returns the line's em size (its first word's font
+/// size) when it is, so callers don't need to re-derive it.
+fn rotated_glyph_em(line: &Line) -> Option<f32> {
+    let em = line
+        .words
+        .first()
+        .map(word_font_size)
+        .filter(|s| *s > 0.0)?;
+    let char_count = line.text.chars().count();
+    let candidate = (1..=ROTATED_LINE_MAX_CHARS).contains(&char_count)
+        && !line.text.chars().any(char::is_whitespace)
+        && line.bbox.width() <= ROTATED_LINE_MAX_WIDTH_EMS * em
+        && line.bbox.height() <= ROTATED_GLYPH_MAX_HEIGHT_EMS * em;
+    candidate.then_some(em)
+}
+
+/// Returns `true` if every line in `run` (which must have length >= 2) shares its first
+/// line's left and right edges within [`ROTATED_COLUMN_X_TOLERANCE_EMS`] of `em`.
+fn is_aligned_column(run: &[Line], em: f32) -> bool {
+    let tol = ROTATED_COLUMN_X_TOLERANCE_EMS * em;
+    let anchor = &run[0];
+    run.iter().all(|line| {
+        (line.bbox.left - anchor.bbox.left).abs() <= tol
+            && (line.bbox.right - anchor.bbox.right).abs() <= tol
+    })
+}
+
+/// Validates a candidate run and, if it passes, returns the signed vertical gap between
+/// each consecutive pair of lines *in stream order* (positive = a gap between them,
+/// negative = overlap). `None` means the run is not a rotated-text run and must be left
+/// alone.
+fn rotated_run_gaps(run: &[Line], em: f32) -> Option<Vec<f32>> {
+    if !is_aligned_column(run, em) {
+        return None;
+    }
+
+    // The run must be monotonically stacked in y (all-ascending or all-descending) to be
+    // a column at all; this says nothing about which way to *read* it (see the function
+    // doc comment's "Reading direction" section) -- only that it is a stack, and which
+    // edge of each box borders the next line in stream order.
+    let ascending = run[1].bbox.bottom > run[0].bbox.bottom;
+    let mut gaps = Vec::with_capacity(run.len() - 1);
+    for pair in run.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let step_ascending = b.bbox.bottom > a.bbox.bottom;
+        if step_ascending != ascending {
+            return None;
+        }
+        let gap = if ascending {
+            b.bbox.bottom - a.bbox.top
+        } else {
+            a.bbox.bottom - b.bbox.top
+        };
+        if gap > ROTATED_RUN_MAX_GAP_EMS * em || gap < -ROTATED_GLYPH_ABUT_EMS * em {
+            return None;
+        }
+        gaps.push(gap);
+    }
+
+    let abutting = gaps
+        .iter()
+        .filter(|g| g.abs() <= ROTATED_GLYPH_ABUT_EMS * em)
+        .count();
+    let abutting_fraction = abutting as f32 / gaps.len() as f32;
+    (abutting_fraction > ROTATED_RUN_MIN_ABUTTING_FRACTION).then_some(gaps)
+}
+
+/// Merges a validated run of stacked single-glyph lines into one horizontal [`Line`],
+/// splitting into separate [`Word`]s wherever `gaps` (aligned to the run's stream order,
+/// one entry per consecutive pair) exceeds [`ROTATED_GLYPH_ABUT_EMS`] times `em`.
+fn merge_rotated_run(run: &[Line], gaps: &[f32], em: f32) -> Line {
+    let mut words: Vec<Word> = Vec::new();
+    let mut current: Vec<&Line> = vec![&run[0]];
+
+    for (line, &gap) in run[1..].iter().zip(gaps) {
+        if gap.abs() > ROTATED_GLYPH_ABUT_EMS * em {
+            words.push(finalize_rotated_word(std::mem::take(&mut current)));
+        }
+        current.push(line);
+    }
+    words.push(finalize_rotated_word(current));
+
+    // Words are kept in stream (not left-to-right) order: unlike `finalize_line`'s
+    // horizontal words, every word here shares one x-column and is distinguished by y, so
+    // sorting by `bbox.left` would be meaningless at best.
+    let text = words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bbox = union_all(run.iter().map(|l| l.bbox)).unwrap_or(BBox::ZERO);
+    Line { text, bbox, words }
+}
+
+/// Builds one merged [`Word`] from a run of single-glyph lines, in stream order.
+fn finalize_rotated_word(lines: Vec<&Line>) -> Word {
+    let text: String = lines.iter().map(|l| l.text.as_str()).collect();
+    let bbox = union_all(lines.iter().map(|l| l.bbox)).unwrap_or(BBox::ZERO);
+    // Every char keeps its own already-extracted bbox; no space char is synthesized for
+    // the word break, mirroring `group_words` (which breaks on whitespace rather than
+    // emitting a char for it) and keeping char counts honest for `metrics::char_recall`.
+    let chars = lines
+        .iter()
+        .flat_map(|l| l.words.iter().flat_map(|w| w.chars.iter().cloned()))
+        .collect();
+    Word { text, bbox, chars }
+}
+
+/// Applies [`merge_rotated_text_runs`]' repair within one block's lines, preserving the
+/// position and order of every line the run detector doesn't claim.
+fn merge_rotated_runs_in_block(lines: &[Line]) -> Vec<Line> {
+    let mut result = Vec::with_capacity(lines.len());
+    let mut i = 0;
+
+    while i < lines.len() {
+        // Extend the candidate streak starting at `i` as far as `rotated_glyph_em`
+        // allows.
+        let mut end = i;
+        while end < lines.len() && rotated_glyph_em(&lines[end]).is_some() {
+            end += 1;
+        }
+        let streak = &lines[i..end];
+
+        if streak.len() >= MIN_ROTATED_RUN_LINES {
+            // The em size that mattered was already computed once per line above; a
+            // median over the streak is robust to any one mis-sized glyph.
+            let mut ems: Vec<f32> = streak
+                .iter()
+                .map(|l| rotated_glyph_em(l).expect("streak members passed rotated_glyph_em"))
+                .collect();
+            ems.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let em = ems[ems.len() / 2];
+
+            if let Some(gaps) = rotated_run_gaps(streak, em) {
+                result.push(merge_rotated_run(streak, &gaps, em));
+                i = end;
+                continue;
+            }
+        }
+
+        // No run here (or validation failed): the line at `i` is not claimed by a merge,
+        // so it passes through unchanged and the scan resumes at the next line.
+        result.push(lines[i].clone());
+        i += 1;
+    }
+
+    result
 }
 
 /// Converts a single PDFium character into our owned [`Char`] type.
@@ -660,5 +945,220 @@ mod tests {
         let blocks = group_chars_into_blocks(&chars);
 
         assert_eq!(blocks[0].text(), "x y");
+    }
+
+    /// Builds a single-glyph [`Line`] the way `group_lines` would leave one after
+    /// shattering a rotated run: one word, one char, all sharing the line's bbox. `left`
+    /// and `right` default to the rotated-sidebar fixture's real column
+    /// (`550.95..562.11`) unless overridden by `rotated_glyph_at`.
+    fn rotated_glyph(ch: char, bottom: f32, top: f32) -> Line {
+        rotated_glyph_at(ch, 550.95, 562.11, bottom, top, 10.0)
+    }
+
+    fn rotated_glyph_at(
+        ch: char,
+        left: f32,
+        right: f32,
+        bottom: f32,
+        top: f32,
+        font_size: f32,
+    ) -> Line {
+        let bbox = BBox {
+            left,
+            bottom,
+            right,
+            top,
+        };
+        let c = char_at(ch, left, bottom, right, top, font_size);
+        let word = Word {
+            text: ch.to_string(),
+            bbox,
+            chars: vec![c],
+        };
+        Line {
+            text: ch.to_string(),
+            bbox,
+            words: vec![word],
+        }
+    }
+
+    fn block_of(lines: Vec<Line>) -> Block {
+        let bbox = union_all(lines.iter().map(|l| l.bbox)).unwrap_or(BBox::ZERO);
+        Block { bbox, lines }
+    }
+
+    /// The corpus fixture's real geometry: 12 stacked one-char lines spelling "SIDEBAR
+    /// LABEL", ascending bottom-to-top, with a 2.78pt (Helvetica space advance at 10pt)
+    /// gap between "R" and "L".
+    #[test]
+    fn merge_rotated_text_runs_merges_stacked_glyphs_into_one_line() {
+        let lines = vec![
+            rotated_glyph('S', 620.0, 626.67),
+            rotated_glyph('I', 626.67, 629.45),
+            rotated_glyph('D', 629.45, 636.67),
+            rotated_glyph('E', 636.67, 643.34),
+            rotated_glyph('B', 643.34, 650.01),
+            rotated_glyph('A', 650.01, 656.69),
+            rotated_glyph('R', 656.68, 663.9),
+            rotated_glyph('L', 666.68, 672.24),
+            rotated_glyph('A', 672.24, 678.92),
+            rotated_glyph('B', 678.91, 685.58),
+            rotated_glyph('E', 685.58, 692.25),
+            rotated_glyph('L', 692.25, 697.81),
+        ];
+        let blocks = vec![block_of(lines)];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        assert_eq!(merged[0].lines.len(), 1);
+        assert_eq!(merged[0].text(), "SIDEBAR LABEL");
+    }
+
+    /// The one 2.78pt gap in the run (a real inter-word space) splits the merged line
+    /// into two words rather than one run-on word.
+    #[test]
+    fn merge_rotated_text_runs_splits_words_at_a_space_sized_gap() {
+        let lines = vec![
+            rotated_glyph('A', 620.0, 626.67),
+            rotated_glyph('B', 626.67, 633.34),
+            rotated_glyph('C', 633.34, 640.01),
+            rotated_glyph('D', 642.79, 650.01),
+        ];
+        let blocks = vec![block_of(lines)];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        assert_eq!(merged[0].lines.len(), 1);
+        assert_eq!(merged[0].lines[0].words.len(), 2);
+        assert_eq!(merged[0].text(), "ABC D");
+    }
+
+    /// Reading direction comes from stream (array) order, not from geometric direction:
+    /// a run whose boxes *descend* (the 90-degree-clockwise case) still reads correctly
+    /// when its lines are already in logical order.
+    #[test]
+    fn merge_rotated_text_runs_preserves_reading_order_for_top_down_runs() {
+        let lines = vec![
+            rotated_glyph('A', 650.01, 656.69),
+            rotated_glyph('B', 643.34, 650.01),
+            rotated_glyph('C', 636.67, 643.34),
+        ];
+        let blocks = vec![block_of(lines)];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        assert_eq!(merged[0].text(), "ABC");
+    }
+
+    /// A streak of only two candidate lines is below `MIN_ROTATED_RUN_LINES` and must be
+    /// left alone -- two stacked short entries alone are too ambiguous with a narrow
+    /// table cell wrapped onto two lines.
+    #[test]
+    fn merge_rotated_text_runs_leaves_a_two_line_run_alone() {
+        let lines = vec![
+            rotated_glyph('A', 620.0, 626.67),
+            rotated_glyph('B', 626.67, 633.34),
+        ];
+        let blocks = vec![block_of(lines.clone())];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        assert_eq!(merged[0].lines, lines);
+    }
+
+    /// A left-aligned column of short horizontal entries with ragged (differing) right
+    /// edges must not be mistaken for a rotated run: the column-alignment guard checks
+    /// both edges, not just `left`.
+    #[test]
+    fn merge_rotated_text_runs_leaves_a_ragged_right_edge_column_alone() {
+        let lines = vec![
+            rotated_glyph_at('A', 100.0, 106.0, 620.0, 630.0, 10.0),
+            rotated_glyph_at('B', 100.0, 109.0, 630.0, 640.0, 10.0),
+            rotated_glyph_at('C', 100.0, 104.0, 640.0, 650.0, 10.0),
+        ];
+        let blocks = vec![block_of(lines.clone())];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        assert_eq!(merged[0].lines, lines);
+    }
+
+    /// A tightly x-aligned but evenly leaded numeric column (no abutting glyphs at all)
+    /// is not a rotated run either -- the abutting-fraction guard is what a pure
+    /// column-alignment check would miss.
+    #[test]
+    fn merge_rotated_text_runs_leaves_a_leaded_numeric_column_alone() {
+        let lines = vec![
+            rotated_glyph('1', 620.0, 630.0),
+            rotated_glyph('2', 642.0, 652.0),
+            rotated_glyph('3', 664.0, 674.0),
+        ];
+        let blocks = vec![block_of(lines.clone())];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        assert_eq!(merged[0].lines, lines);
+    }
+
+    /// A block mixing an ordinary heading, a rotated run, and a trailing paragraph line
+    /// keeps every line in its original relative position; only the run is replaced.
+    #[test]
+    fn merge_rotated_text_runs_keeps_non_matching_lines_in_place() {
+        let heading = rotated_glyph_at(
+            "Heading".chars().next().unwrap(),
+            72.0,
+            200.0,
+            700.0,
+            712.0,
+            12.0,
+        );
+        let run = vec![
+            rotated_glyph('S', 620.0, 626.67),
+            rotated_glyph('I', 626.67, 629.45),
+            rotated_glyph('D', 629.45, 636.67),
+        ];
+        let trailing = rotated_glyph_at(
+            "Tail".chars().next().unwrap(),
+            72.0,
+            200.0,
+            500.0,
+            512.0,
+            12.0,
+        );
+
+        let mut lines = vec![heading.clone()];
+        lines.extend(run);
+        lines.push(trailing.clone());
+        let blocks = vec![block_of(lines)];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        assert_eq!(merged[0].lines.len(), 3);
+        assert_eq!(merged[0].lines[0], heading);
+        assert_eq!(merged[0].lines[1].text, "SID");
+        assert_eq!(merged[0].lines[2], trailing);
+    }
+
+    /// The merge must not drop or duplicate any character -- `metrics::char_recall`
+    /// depends on the total character count surviving assembly untouched.
+    #[test]
+    fn merge_rotated_text_runs_preserves_every_char() {
+        let lines = vec![
+            rotated_glyph('S', 620.0, 626.67),
+            rotated_glyph('I', 626.67, 629.45),
+            rotated_glyph('D', 629.45, 636.67),
+            rotated_glyph('E', 636.67, 643.34),
+        ];
+        let blocks = vec![block_of(lines)];
+
+        let merged = merge_rotated_text_runs(&blocks);
+
+        let char_count: usize = merged[0]
+            .lines
+            .iter()
+            .flat_map(|l| l.words.iter())
+            .map(|w| w.chars.len())
+            .sum();
+        assert_eq!(char_count, 4);
     }
 }
