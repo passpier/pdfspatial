@@ -2,7 +2,7 @@
   "id": "list_nesting-two-short-outlines-narrow-gutter-interleaved",
   "pitfall": "list_nesting",
   "root_cause": "ordering",
-  "description": "A second, shorter variant of the two-column nested-outline scenario (one sub-item per header instead of two), confirming the row-interleaving fallback triggers regardless of outline depth as long as the column gutter stays under the 18pt threshold.",
+  "description": "A second, shorter variant of the two-column nested-outline scenario (one sub-item per header instead of two), confirming the em-relative vertical cut (MIN_GUTTER_EMS) recovers column-major order regardless of outline depth, at the same 10pt (1 em) gutter that used to fall below the old fixed 18pt MIN_CUT_FRACTION threshold and trigger row-interleaving.",
   "page": {
     "width": 600.0,
     "height": 800.0,

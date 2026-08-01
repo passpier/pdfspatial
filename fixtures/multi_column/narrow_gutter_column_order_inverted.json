@@ -2,7 +2,7 @@
   "id": "multi_column-narrow-gutter-column-order-inverted",
   "pitfall": "multi_column",
   "root_cause": "ordering",
-  "description": "Left and right column blocks with a 10pt gutter (below the 18pt threshold) and slightly different top-y positions. With no qualifying cut, the naive fallback sorts purely by descending top-y, so the right column (whose top edge sits a few points higher) is read entirely before the left column -- a full column-order inversion.",
+  "description": "Left and right column blocks with a 10pt gutter (1 em at the page's 10pt font, above assemble.rs's em-relative MIN_GUTTER_EMS threshold, though below the old fixed 18pt page-fraction rule) and slightly different top-y positions. The right column's top edge sits a few points higher than the left's, so before adaptive gutter detection landed, no cut qualified and the naive top-y fallback read the right column entirely before the left -- a full column-order inversion. The em-relative vertical cut now fires and recovers left-before-right order.",
   "page": {
     "width": 600.0,
     "height": 800.0,

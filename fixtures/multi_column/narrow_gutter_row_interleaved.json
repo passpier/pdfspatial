@@ -2,7 +2,7 @@
   "id": "multi_column-narrow-gutter-row-interleaved",
   "pitfall": "multi_column",
   "root_cause": "ordering",
-  "description": "Two columns separated by a 10pt gutter, below assemble.rs's MIN_CUT_FRACTION (3% of a 600pt-wide page = 18pt). The vertical cut never qualifies, so xy_cut_order falls back to naive top-to-bottom/left-to-right sorting, which interleaves the two columns row by row instead of reading the left column fully before the right.",
+  "description": "Two columns separated by a 10pt gutter -- 1 em at the page's 10pt font, below assemble.rs's old fixed MIN_CUT_FRACTION (3% of a 600pt-wide page = 18pt) but above the em-relative MIN_GUTTER_EMS threshold that replaced it as the vertical-cut rule. Before that change the vertical cut never qualified, so xy_cut_order fell back to naive top-to-bottom/left-to-right sorting, interleaving the two columns row by row instead of reading the left column fully before the right; the em-relative cut now recognizes the gutter and recovers column-major order.",
   "page": {
     "width": 600.0,
     "height": 800.0,

@@ -2,7 +2,7 @@
   "id": "list_nesting-two-outlines-narrow-gutter-interleaved",
   "pitfall": "list_nesting",
   "root_cause": "ordering",
-  "description": "Two side-by-side nested outlines (a header item plus two sub-items each), separated by a 10pt gutter -- below assemble.rs's 18pt MIN_CUT_FRACTION threshold for a 600pt-wide page. With no qualifying cut, the naive top-to-bottom/left-to-right fallback interleaves the two outlines row by row, so the second outline's header is read before the first outline's own sub-items -- collapsing each list's internal hierarchy into a single flat, incorrectly ordered sequence.",
+  "description": "Two side-by-side nested outlines (a header item plus two sub-items each), separated by a 10pt gutter -- 1 em at the page's 10pt font, below assemble.rs's old fixed 18pt MIN_CUT_FRACTION threshold for a 600pt-wide page but above the em-relative MIN_GUTTER_EMS threshold that replaced it for the vertical cut. Before that change, no cut qualified and the naive top-to-bottom/left-to-right fallback interleaved the two outlines row by row, so the second outline's header was read before the first outline's own sub-items -- collapsing each list's internal hierarchy into a single flat, incorrectly ordered sequence. The em-relative cut now reads each outline (header, then its sub-items) fully before the next -- ordering is fixed, though the outlines still flatten into a single list rather than a nested one, since nothing yet encodes hierarchy depth.",
   "page": {
     "width": 600.0,
     "height": 800.0,

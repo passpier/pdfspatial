@@ -117,17 +117,30 @@ Every seeded case's `expected` block states what the pipeline *should* do once S
 lands the corresponding fix -- not a snapshot of today's (wrong) output. Running
 `cargo test --features stage3 -- --ignored` executes
 `corpus_cases_meet_expected_behavior`, which is `#[ignore]`d for exactly this reason: it
-currently fails for 19 of the corpus's 26 cases, printing a scoreboard of every mismatch.
-Seven cases pass today: `multi_column-wide-gutter-recovers-column-order`
+currently fails for 15 of the corpus's 26 cases, printing a scoreboard of every mismatch.
+Eleven cases pass today: `multi_column-wide-gutter-recovers-column-order`
 (`fixtures/multi_column/`) is a *positive contrast* case -- its gutter is wide enough for
-`assemble::MIN_CUT_FRACTION` to fire -- and is checked unconditionally by
-`tests/stage3_corpus.rs`'s `multi_column_wide_gutter_recovers_reading_order`, not the
-`#[ignore]`d scoreboard; `super_subscript-formula-baseline-clustering`
-(`fixtures/super_subscript/`) is the corpus's first *fixed* case -- Stage 1's
-`extract::group_words` now recognizes a smaller, baseline-offset, nearby character as a
-super/subscript of its predecessor and attaches it to its base instead of splitting it off
-as its own word, so it flows through the ordinary scoreboard and simply passes. All three
-`header_footer` cases (`running-header-exceeds-line-limit`,
+`assemble::MIN_CUT_FRACTION` to fire regardless of the em-relative rule below -- and is
+checked unconditionally by `tests/stage3_corpus.rs`'s
+`multi_column_wide_gutter_recovers_reading_order`, not the `#[ignore]`d scoreboard.
+All three narrow-gutter ordering cases in `multi_column`/`list_nesting` now pass too --
+`assemble::widest_vertical_gutter`'s qualifying threshold is no longer a fixed fraction of
+page width (`MIN_CUT_FRACTION`, still used on the horizontal axis and as the vertical
+threshold's upper bound); it scales to the page's own median character size
+(`MIN_GUTTER_EMS` × the page's median `Char::font_size`, floored by `MIN_GUTTER_ABS_PT`),
+so a 1-em column gutter in small type qualifies as a cut even though it's well under 3%
+of the page width. A companion guard (`vertical_extents_overlap`) requires the blocks on
+either side of a candidate gutter to actually coexist vertically before it counts as a
+column boundary, so two unrelated blocks in opposite page corners aren't mistaken for
+columns now that the threshold is looser. Column *ordering* is fixed by this change;
+list *nesting* (hierarchy depth, not order) remains open --
+`two-outlines-narrow-gutter-interleaved` and its short variant now read each outline
+fully before the next, but both still flatten into one list rather than a nested one.
+`super_subscript-formula-baseline-clustering` (`fixtures/super_subscript/`) is a *fixed*
+case -- Stage 1's `extract::group_words` now recognizes a smaller, baseline-offset,
+nearby character as a super/subscript of its predecessor and attaches it to its base
+instead of splitting it off as its own word, so it flows through the ordinary scoreboard
+and simply passes. All three `header_footer` cases (`running-header-exceeds-line-limit`,
 `running-footer-exceeds-line-limit`, `repeated-running-header-across-pages`) now pass as
 well -- `layout::classify_block`'s band rule was relaxed from a hard line-count cap to a
 shape test (thin strip, detached from the body by a minimum gap), and `classify_regions`
