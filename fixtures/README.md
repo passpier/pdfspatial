@@ -117,8 +117,10 @@ Every seeded case's `expected` block states what the pipeline *should* do once S
 lands the corresponding fix -- not a snapshot of today's (wrong) output. Running
 `cargo test --features stage3 -- --ignored` executes
 `corpus_cases_meet_expected_behavior`, which is `#[ignore]`d for exactly this reason: it
-currently fails for 15 of the corpus's 26 cases, printing a scoreboard of every mismatch.
-Eleven cases pass today: `multi_column-wide-gutter-recovers-column-order`
+currently fails for some cases, printing a scoreboard of every mismatch -- see the
+generated coverage block above (or `cargo run --example stage3_scoreboard --features
+stage3`) for the live per-pitfall pass/fail counts, rather than a number restated here
+by hand. `multi_column-wide-gutter-recovers-column-order`
 (`fixtures/multi_column/`) is a *positive contrast* case -- its gutter is wide enough for
 `assemble::MIN_CUT_FRACTION` to fire regardless of the em-relative rule below -- and is
 checked unconditionally by `tests/stage3_corpus.rs`'s
@@ -170,36 +172,40 @@ per-pitfall coverage report on stderr).
 
 ## Coverage
 
+Generated from the live corpus by `eval::scoreboard`/`examples/stage3_scoreboard.rs`
+-- **never hand-edit the text between the `<!-- BEGIN/END GENERATED -->` markers**;
+run `cargo run --example stage3_scoreboard --features stage3 -- --write` to
+regenerate after any corpus change. Per-pitfall "why it needs a real PDF" prose lives
+in [`docs/pitfall_registry.json`](../docs/pitfall_registry.json).
+
+<!-- BEGIN GENERATED: pitfall-coverage -->
 All 15 `assemble::Pitfall` variants are seeded, 26 cases total:
 
-**Hand-authored, synthetic `Document`s** (9 pitfalls, 2 cases each plus one
-`multi_column` positive-contrast case and a third `header_footer` case covering
-cross-page repeated-content detection, 20 total -- reachable through the synthetic
-`classify_regions`/`assemble_reading_order` surface, no PDF or PDFium involved):
+**Hand-authored, synthetic `Document`s** -- reachable through the synthetic `classify_regions`/`assemble_reading_order` surface, no PDF or PDFium involved:
 
 | Pitfall | Root cause |
 |---|---|
-| `multi_column` | `ordering` |
-| `footnote` | `classification` |
-| `header_footer` | `classification` |
-| `borderless_table` | `classification` |
-| `merged_table_cell` | `classification` |
-| `nested_formula` | `classification` |
-| `figure_caption` | `classification` |
-| `section_header_vs_bold` | `classification` |
-| `list_nesting` | `ordering` |
+| `multi_column` (Multi-column layout / gutter detection) | `ordering` |
+| `footnote` (Footnotes) | `classification` |
+| `header_footer` (Page headers/footers repeated across pages) | `classification` |
+| `merged_table_cell` (Merged table cells (rowspan/colspan)) | `classification` |
+| `borderless_table` (Borderless / whitespace-delimited tables) | `classification` |
+| `nested_formula` (Nested mathematical formulas) | `classification` |
+| `figure_caption` (Figure/caption association) | `classification` |
+| `list_nesting` (List-item nesting) | `ordering` |
+| `section_header_vs_bold` (Section headers vs. bold body text) | `classification` |
 
-**PDF-backed, frozen-extraction snapshots** (6 pitfalls, 1 case each, 6 total -- see
-"PDF-backed cases" below):
+**PDF-backed, frozen-extraction snapshots** -- see "PDF-backed cases" below:
 
 | Pitfall | Root cause | Why it needs a real PDF |
 |---|---|---|
-| `super_subscript` | `geometric` | A character-extraction/baseline-clustering failure in the real PDFium text layer; a synthetic already-grouped `Document` gives Stage 1's baseline clustering nothing to get wrong. **Fixed** -- `extract::group_words`'s script-continuation check now attaches a raised/lowered, much-smaller, nearby character to its base word; this is the one PDF-backed case that already passes the scoreboard. |
+| `multi_line_table_cell` | `classification` | Real Stage 1 block grouping merges the row's cells together across the column gap in a way a hand-authored already-split `Document` can't demonstrate. |
+| `super_subscript` | `geometric` | A character-extraction/baseline-clustering failure in the real PDFium text layer; a synthetic already-grouped `Document` gives Stage 1's baseline clustering nothing to get wrong. **Fixed** — this is the one PDF-backed case that already passes the scoreboard. |
 | `rotated_text` | `geometric` | Needs real glyph rotation data from PDFium's text layer. |
+| `cross_page_continuation` | `ordering` | Needs a real multi-page extraction; `assemble_reading_order` only operates within a single page, and a synthetic multi-page `Document` wouldn't exercise the actual stitching gap PDFium extraction produces. |
 | `embedded_font` | `geometric` | Needs a real custom-encoded/CID-keyed font to reproduce dropped/garbled glyphs. |
 | `overlapping_text` | `geometric` | Needs real z-ordered text objects from a PDF. |
-| `multi_line_table_cell` | `classification` | Real Stage 1 block grouping merges the row's cells together across the column gap in a way a hand-authored already-split `Document` can't demonstrate. |
-| `cross_page_continuation` | `ordering` | Needs a real multi-page extraction; `assemble_reading_order` only operates within a single page, and a synthetic multi-page `Document` wouldn't exercise the actual stitching gap PDFium extraction produces. |
+<!-- END GENERATED: pitfall-coverage -->
 
 The roadmap's "≥ 20 samples per category" target is scoped as future work for a
 real-data DocLayNet mining pass (once a DocLayNet sample is available in this

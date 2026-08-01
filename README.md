@@ -29,7 +29,9 @@ an intentional, documented stub — see [Status](#status).
 | Heuristic layout classification (Title, Header, List, Caption, ...) | ✅ Stable |
 | Structural Markdown serialization | ✅ Stable |
 | Validation metrics (TEDS, GIoU, region F1) against DocLayNet | ✅ Stable |
+<!-- BEGIN GENERATED: pitfall-status-row -->
 | Regression corpus of known failure modes (26 seeded cases) | ✅ Stable |
+<!-- END GENERATED: pitfall-status-row -->
 | Vision-model region detection (`Table`/`Picture`/`Formula`) | 📋 Planned — documented `unimplemented!()` stub, needs an ONNX runtime + model weights, out of scope for now |
 
 See [`docs/PDF-to-Markdown Pipeline Roadmap.md`](docs/PDF-to-Markdown%20Pipeline%20Roadmap.md)

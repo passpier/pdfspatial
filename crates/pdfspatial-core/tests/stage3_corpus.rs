@@ -194,45 +194,19 @@ fn corpus_covers_seeded_pitfalls() {
 
 #[test]
 #[ignore = "Stage 3 failing specs -- flip green as Stage 4 lands fixes; run with \
-            `cargo test --features stage3 -- --ignored` for the full scoreboard"]
+            `cargo test --features stage3 -- --ignored` for the full scoreboard, or \
+            `cargo run --example stage3_scoreboard --features stage3` for the same \
+            report outside a panic message"]
 fn corpus_cases_meet_expected_behavior() {
+    // `eval::scoreboard::score_corpus` is the single implementation of "aggregate
+    // non-draft case outcomes by pitfall" -- this test's only job is to turn that
+    // aggregate into a pass/fail assertion with a readable panic message, via
+    // `render_text`, which `examples/stage3_scoreboard.rs` shares verbatim.
     let cases = load_corpus(&corpus_dir()).expect("corpus should load without error");
+    let board = pdfspatial_core::eval::scoreboard::score_corpus(&cases);
 
-    // Draft cases (see `eval::corpus::DraftCase`) encode `expected` as a snapshot of
-    // *current* pipeline behavior, not desired post-fix behavior -- they pass this
-    // scoreboard trivially by construction, so including them would mask real
-    // regressions. They stay out of `fixtures/` until reviewed and re-authored anyway;
-    // this filter is a defensive guard against that convention slipping.
-    let outcomes: Vec<_> = cases
-        .iter()
-        .filter(|c| !c.draft)
-        .map(evaluate_case)
-        .collect();
-    let failing: Vec<_> = outcomes.iter().filter(|o| !o.passed).collect();
-
-    if !failing.is_empty() {
-        let mut report = String::from("Stage 3 regression corpus scoreboard -- failing cases:\n");
-        for outcome in &failing {
-            report.push_str(&format!("  - {}:\n", outcome.case_id));
-            for mismatch in &outcome.mismatches {
-                report.push_str(&format!("      {mismatch}\n"));
-            }
-            if let Some(distance) = outcome.reading_order_edit_distance {
-                report.push_str(&format!(
-                    "      reading-order edit distance: {distance} (naive input order: {})\n",
-                    outcome
-                        .naive_reading_order_edit_distance
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "?".to_string())
-                ));
-            }
-        }
-        report.push_str(&format!(
-            "\n{} / {} cases failing.\n",
-            failing.len(),
-            outcomes.len()
-        ));
-        panic!("{report}");
+    if board.passing < board.total {
+        panic!("{}", pdfspatial_core::eval::scoreboard::render_text(&board));
     }
 }
 

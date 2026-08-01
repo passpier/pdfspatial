@@ -61,7 +61,38 @@ serialization) grounded in spatial (bounding-box) extraction rather than layout 
 
 - All crate errors flow through a single `PipelineError` enum (`thiserror`).
 - Modules: `extract`, `layout`, `assemble`, `metrics`, `serialize`, `eval` (with `eval::doclaynet`
-  gated behind the `doclaynet` feature and `eval::corpus` gated behind the `stage3` feature).
+  gated behind the `doclaynet` feature and `eval::corpus`/`eval::scoreboard` gated behind the
+  `stage3` feature).
 - Public APIs carry doc comments with runnable `# Examples` doctests — keep this pattern for new
   public functions.
 - `Cargo.lock` is gitignored (this is a library crate).
+
+## Stage 3 pitfall scoreboard — generated, not hand-maintained
+
+The roadmap's Document-Structure Pitfall Checklist, `fixtures/README.md`'s coverage
+tables, and `README.md`'s corpus status row are **generated** from the live Stage 3
+regression corpus by `eval::scoreboard` / `examples/stage3_scoreboard.rs`, spliced into
+each doc between `<!-- BEGIN GENERATED: name --> … <!-- END GENERATED: name -->`
+markers. **Never hand-edit the text inside those markers** — it will be silently
+overwritten by the next `--write` and, before that, flagged as stale by
+`tests/stage3_docs.rs::generated_blocks_are_in_sync` (part of `--features stage3`, so
+CI's `--all-features` run enforces it) and by a `Stop` hook that runs `-- --check`
+whenever a turn touched `crates/pdfspatial-core/src/` or `fixtures/`.
+
+- `cargo run --example stage3_scoreboard --features stage3` — text scoreboard (same
+  report `cargo test --features stage3 -- --ignored` panics with).
+- `-- --format json` — machine-readable per-pitfall/per-case detail.
+- `-- --write` — regenerate every doc's generated blocks from the live corpus.
+- `-- --check` — exit 1 (with a diff) if any doc has drifted; no exit-code doc write.
+- Human judgement that no test can derive (why a corpus-green pitfall is still only
+  `[~]` partial, what unblocks a blocked pitfall, PDF-backed rationale) lives in
+  `docs/pitfall_registry.json`, one entry per `assemble::Pitfall` slug, merged in by the
+  same generator — edit that file by hand, never the generated Markdown.
+- `.claude/skills/pitfall-status` is a read-only status pass over the scoreboard/sync
+  state; `.claude/skills/pitfall-fix` is a bounded, file-backed loop
+  (`.claude/pitfall-loop/<slug>.md`, gitignored) that iterates Stage 4 heuristic fixes
+  for one named pitfall until its corpus cases pass, a stop condition is hit, or the
+  pitfall is refused outright (any pitfall whose `docs/pitfall_registry.json` entry sets
+  `blocked.loop_refuses: true` needs the out-of-scope vision-model stub, not a
+  heuristic — see the note above about `unimplemented!()`). It edits
+  `crates/pdfspatial-core/src/**` across iterations but never runs `git commit`.

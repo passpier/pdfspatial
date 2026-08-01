@@ -12,8 +12,12 @@ continuing past it.
    - `cargo test --features doclaynet` always runs (no external dependency).
    - `cargo test --all-features` additionally exercises `tests/stage1_baseline.rs`, which needs a
      native PDFium library. Only run this tier if `PDFSPATIAL_PDFIUM_LIB` is set in the
-     environment, or the library is reachable via the OS dynamic-loader path. If it isn't set,
-     run the `doclaynet`-only tier and tell the user PDFium-dependent tests were skipped and why.
+     environment, a gitignored `.cargo/config.toml` sets it (written by
+     `scripts/fetch-pdfium.sh --write-cargo-config` — check for `[env]` /
+     `PDFSPATIAL_PDFIUM_LIB` in that file), or the library is reachable via the OS
+     dynamic-loader path. If none of those hold, run the `doclaynet`-only tier, tell the user
+     PDFium-dependent tests were skipped, and point them at
+     `./scripts/fetch-pdfium.sh --write-cargo-config`.
 
 A plain `cargo test` alone is insufficient — it silently skips the `doclaynet`-gated dataset
 harness test.

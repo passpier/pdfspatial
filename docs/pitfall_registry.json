@@ -1,0 +1,131 @@
+{
+  "multi_column": {
+    "title": "Multi-column layout / gutter detection",
+    "summary": "text lines merged across column boundaries, or column order inverted (right column read before left)",
+    "note": "assemble::assemble_reading_order's XY-cut now qualifies a vertical gutter against the page's own median character size (MIN_GUTTER_EMS), not just a fixed page-width fraction (MIN_CUT_FRACTION), so narrow (1 em) column gutters recover column-major order the same way wide ones already did"
+  },
+  "footnote": {
+    "title": "Footnotes",
+    "summary": "footnote text merged into body `Text` region instead of classified as `Footnote`; footnote markers (superscript numerals) not linked to their note",
+    "note": "classified via layout::classify_block's footnote rule (requires a block to sit low on the page, carry a smaller font than the rest of the page, and open with a recognized footnote marker) -- but serialize::render_block has no Footnote arm yet, so marker-to-note linking/rendering is still open",
+    "status_override": "partial",
+    "blocked": {
+      "reason": "Footnote rendering not wired up",
+      "unblocked_by": "Add a `RegionClass::Footnote` arm to `serialize::render_block`; link markers to their note",
+      "loop_refuses": false
+    }
+  },
+  "header_footer": {
+    "title": "Page headers/footers repeated across pages",
+    "summary": "header/footer text leaking into the body text stream; running headers misclassified as `Section-header`",
+    "note": "layout::band_of's shape test (thin strip, detached from the body by a minimum gap) plus a cross-page repeated_running_bands pass, suppressed in serialize::render_block"
+  },
+  "multi_line_table_cell": {
+    "title": "Nested/multi-line table cells",
+    "summary": "cells spanning multiple visual lines merged incorrectly with adjacent rows; rowspan/colspan not detected",
+    "blocked": {
+      "reason": "No code path emits `Table`/`Formula`/`Picture`",
+      "unblocked_by": "Stage 4b vision detector — the documented `unimplemented!()` stub",
+      "loop_refuses": true
+    },
+    "pdf_backed_reason": "Real Stage 1 block grouping merges the row's cells together across the column gap in a way a hand-authored already-split `Document` can't demonstrate."
+  },
+  "merged_table_cell": {
+    "title": "Merged table cells (rowspan/colspan)",
+    "summary": "TEDS-Struct penalizes tree-topology mismatches here most heavily",
+    "blocked": {
+      "reason": "No code path emits `Table`/`Formula`/`Picture`",
+      "unblocked_by": "Stage 4b vision detector — the documented `unimplemented!()` stub",
+      "loop_refuses": true
+    }
+  },
+  "borderless_table": {
+    "title": "Borderless / whitespace-delimited tables",
+    "summary": "no ruling lines for the layout model to key off; frequently misclassified as plain `Text`",
+    "blocked": {
+      "reason": "No code path emits `Table`/`Formula`/`Picture`",
+      "unblocked_by": "Stage 4b vision detector — the documented `unimplemented!()` stub",
+      "loop_refuses": true
+    }
+  },
+  "nested_formula": {
+    "title": "Nested mathematical formulas",
+    "summary": "inline formulas embedded mid-sentence not separated from surrounding text; multi-line/stacked formulas (fractions, summations, matrices) fragmented into multiple bounding boxes",
+    "blocked": {
+      "reason": "No code path emits `Table`/`Formula`/`Picture`",
+      "unblocked_by": "Stage 4b vision detector — the documented `unimplemented!()` stub",
+      "loop_refuses": true
+    }
+  },
+  "super_subscript": {
+    "title": "Superscript/subscript handling",
+    "summary": "footnote markers, exponents, and chemical/math subscripts causing baseline-clustering errors in Stage 1's line grouping",
+    "note": "extract::group_words's is_script_continuation check now recognizes a smaller, baseline-offset, nearby character as a super/subscript of its predecessor and attaches it to its base instead of splitting it off",
+    "pdf_backed_reason": "A character-extraction/baseline-clustering failure in the real PDFium text layer; a synthetic already-grouped `Document` gives Stage 1's baseline clustering nothing to get wrong. **Fixed** — this is the one PDF-backed case that already passes the scoreboard."
+  },
+  "rotated_text": {
+    "title": "Rotated or vertical text",
+    "summary": "sidebar labels, rotated table headers, CJK vertical text (relevant given Traditional Chinese/Japanese document support)",
+    "blocked": {
+      "reason": "Stage 1 extraction gaps (`requires_extraction_fix`)",
+      "unblocked_by": "Read PDFium's rotation matrix / encoding table / z-order in `extract.rs`",
+      "loop_refuses": false
+    },
+    "pdf_backed_reason": "Needs real glyph rotation data from PDFium's text layer."
+  },
+  "figure_caption": {
+    "title": "Figure/caption association",
+    "summary": "captions not correctly linked to their parent `Picture`/`Table` region, or associated with the wrong figure when multiple figures share a page",
+    "note": "layout::is_caption covers the caption half, but no code path emits RegionClass::Picture",
+    "blocked": {
+      "reason": "No code path emits `Table`/`Formula`/`Picture`",
+      "unblocked_by": "Stage 4b vision detector — the documented `unimplemented!()` stub",
+      "loop_refuses": true
+    }
+  },
+  "list_nesting": {
+    "title": "List-item nesting",
+    "summary": "multi-level bullet/numbered lists collapsed into flat `List-item` blocks, losing hierarchy",
+    "note": "reading order now passes after the narrow-gutter fix shared with multi-column above -- each side-by-side outline is read fully before the next; hierarchy/depth itself is still not modeled, so nested lists still flatten into one flat sequence",
+    "status_override": "partial"
+  },
+  "cross_page_continuation": {
+    "title": "Cross-page table/paragraph continuation",
+    "summary": "tables or paragraphs split across a page boundary not stitched back together",
+    "blocked": {
+      "reason": "`assemble_reading_order` is single-page",
+      "unblocked_by": "Cross-page stitching (Stage 4a, third bullet)",
+      "loop_refuses": false
+    },
+    "pdf_backed_reason": "Needs a real multi-page extraction; `assemble_reading_order` only operates within a single page, and a synthetic multi-page `Document` wouldn't exercise the actual stitching gap PDFium extraction produces."
+  },
+  "section_header_vs_bold": {
+    "title": "Section headers vs. bold body text",
+    "summary": "`Section-header` misclassified as `Title` or emphasized `Text` when font-weight is the only visual cue",
+    "blocked": {
+      "reason": "Corpus schema carries no font-weight signal",
+      "unblocked_by": "Extend `extract`/the corpus JSON schema with font name/weight *before* touching the classifier",
+      "loop_refuses": false
+    }
+  },
+  "embedded_font": {
+    "title": "Embedded/CID-keyed fonts and ligatures",
+    "summary": "pdfium character extraction dropping or garbling glyphs from non-standard font encodings",
+    "blocked": {
+      "reason": "Stage 1 extraction gaps (`requires_extraction_fix`)",
+      "unblocked_by": "Read PDFium's rotation matrix / encoding table / z-order in `extract.rs`",
+      "loop_refuses": false
+    },
+    "pdf_backed_reason": "Needs a real custom-encoded/CID-keyed font to reproduce dropped/garbled glyphs."
+  },
+  "overlapping_text": {
+    "title": "Overlapping/z-ordered text objects",
+    "summary": "watermarks, stamps, or redaction boxes overlapping real text and corrupting bbox clustering",
+    "blocked": {
+      "reason": "Stage 1 extraction gaps (`requires_extraction_fix`)",
+      "unblocked_by": "Read PDFium's rotation matrix / encoding table / z-order in `extract.rs`",
+      "loop_refuses": false
+    },
+    "pdf_backed_reason": "Needs real z-ordered text objects from a PDF."
+  }
+}

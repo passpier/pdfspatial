@@ -17,12 +17,18 @@
 //!   corpus — hand-authored, minimal-repro cases tagged by failure-mode taxonomy — and
 //!   checks the pipeline's actual behavior against each case's desired post-fix
 //!   behavior.
+//! - [`scoreboard`] (behind the `stage3` cargo feature) aggregates [`corpus`]'s
+//!   per-case outcomes by pitfall and renders them into the generated blocks embedded
+//!   in the roadmap and `fixtures/README.md` -- see `examples/stage3_scoreboard.rs`.
 
 #[cfg(feature = "doclaynet")]
 pub mod doclaynet;
 
 #[cfg(feature = "stage3")]
 pub mod corpus;
+
+#[cfg(feature = "stage3")]
+pub mod scoreboard;
 
 use crate::layout::{Region, RegionClass};
 use crate::metrics;
