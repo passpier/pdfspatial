@@ -52,7 +52,7 @@ Every case must live directly under the directory matching its own `pitfall` fie
     "blocks": [
       {
         "lines": [
-          { "text": "...", "bbox": [40.0, 700.0, 290.0, 750.0], "font_size": 10.0 }
+          { "text": "...", "bbox": [40.0, 700.0, 290.0, 750.0], "font_size": 10.0, "font_name": "Helvetica-Bold" }
         ]
       }
     ]
@@ -68,6 +68,11 @@ Every case must live directly under the directory matching its own `pitfall` fie
 
 - `bbox` is `[left, bottom, right, top]`, already in the crate's own bottom-left-origin
   coordinate space (no COCO-style flip needed -- these are hand-authored directly).
+- `font_name` (optional, defaults to a placeholder): the PDF font's own name, e.g.
+  `"Helvetica-Bold"`. It's the only weight signal this crate's extraction layer exposes
+  (`Char::font_name`) -- no numeric weight is available -- so `section_header_vs_bold`
+  cases that need a bold-at-body-size heading (no font-size cue) set it on their heading
+  lines only, leaving body lines at the default.
 - A block is authored as one or more `lines` (each its own line/word/char run) so a
   case can control line count directly -- several pitfalls (running headers/footers,
   multi-line table cells, fragmented formulas) hinge on `Block::lines().len()`, which a

@@ -244,6 +244,12 @@ struct LineFile {
     bbox: [f32; 4],
     #[serde(default = "default_font_size")]
     font_size: f32,
+    /// The PDF font's own name (e.g. `"Helvetica-Bold"`), the only weight signal this
+    /// crate's extraction layer exposes (see [`crate::Char::font_name`]). Optional
+    /// because most cases don't care about weight; defaults to the same placeholder
+    /// [`document_from_pages`] always used before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    font_name: Option<String>,
 }
 
 fn default_font_size() -> f32 {
@@ -512,7 +518,10 @@ fn document_from_pages(pages: &[PageFile]) -> Document {
                                 .map(|ch| Char {
                                     unicode: Some(ch),
                                     bbox,
-                                    font_name: "Stage3Corpus".to_string(),
+                                    font_name: line_file
+                                        .font_name
+                                        .clone()
+                                        .unwrap_or_else(|| "Stage3Corpus".to_string()),
                                     font_size: line_file.font_size,
                                 })
                                 .collect();
@@ -703,8 +712,8 @@ pub fn draft_case_json(draft: &DraftCase) -> Result<String, CorpusError> {
 /// Converts a real [`Page`] (e.g. mined from DocLayNet, or extracted by
 /// [`crate::extract_baseline`]) into the on-disk `PageFile` schema, dropping only
 /// `Page::index` (which the schema derives from position in `page`/`pages`) and
-/// collapsing each line's per-char font sizes down to its first char's, since the
-/// schema authors one `font_size` per line, not per char.
+/// collapsing each line's per-char font size/name down to its first char's, since the
+/// schema authors one `font_size`/`font_name` per line, not per char.
 fn page_file_from_page(page: &Page) -> PageFile {
     let blocks = page
         .blocks
@@ -713,20 +722,21 @@ fn page_file_from_page(page: &Page) -> PageFile {
             lines: block
                 .lines
                 .iter()
-                .map(|line| LineFile {
-                    text: line.text.clone(),
-                    bbox: [
-                        line.bbox.left,
-                        line.bbox.bottom,
-                        line.bbox.right,
-                        line.bbox.top,
-                    ],
-                    font_size: line
-                        .words
-                        .first()
-                        .and_then(|w| w.chars.first())
-                        .map(|c| c.font_size)
-                        .unwrap_or_else(default_font_size),
+                .map(|line| {
+                    let first_char = line.words.first().and_then(|w| w.chars.first());
+                    LineFile {
+                        text: line.text.clone(),
+                        bbox: [
+                            line.bbox.left,
+                            line.bbox.bottom,
+                            line.bbox.right,
+                            line.bbox.top,
+                        ],
+                        font_size: first_char
+                            .map(|c| c.font_size)
+                            .unwrap_or_else(default_font_size),
+                        font_name: first_char.map(|c| c.font_name.clone()),
+                    }
                 })
                 .collect(),
         })

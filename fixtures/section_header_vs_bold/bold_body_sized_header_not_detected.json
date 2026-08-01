@@ -2,12 +2,12 @@
   "id": "section_header_vs_bold-bold-body-sized-header-not-detected",
   "pitfall": "section_header_vs_bold",
   "root_cause": "classification",
-  "description": "A section heading set in bold body-sized type (10pt, same as the surrounding text) rather than a larger font. classify_regions's only heading signal is SECTION_HEADER_FONT_FACTOR (font size >= 1.15x the body median); this crate's Char/Line/Block model carries no bold/weight flag at all, so a same-size bold heading is indistinguishable from body text and defaults to RegionClass::Text.",
+  "description": "A section heading set in bold body-sized type (10pt, same as the surrounding text) rather than a larger font. classify_regions's size-based heading signal (SECTION_HEADER_FONT_FACTOR, font size >= 1.15x the body median) can't catch this; it needs the bold-font-name signal (block_is_bold, gated by page_is_predominantly_bold) to promote a same-size bold block to SectionHeader.",
   "page": {
     "width": 600.0,
     "height": 800.0,
     "blocks": [
-      { "lines": [ { "text": "Results and Discussion", "bbox": [40.0, 600.0, 560.0, 615.0], "font_size": 10.0 } ] },
+      { "lines": [ { "text": "Results and Discussion", "bbox": [40.0, 600.0, 560.0, 615.0], "font_size": 10.0, "font_name": "Helvetica-Bold" } ] },
       { "lines": [ { "text": "This section presents the results of the experiment in detail across multiple paragraphs.", "bbox": [40.0, 500.0, 560.0, 595.0], "font_size": 10.0 } ] }
     ]
   },

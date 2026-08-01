@@ -119,6 +119,13 @@ const FOOTNOTE_BAND_FRACTION: f32 = 0.25;
 /// font size (see [`body_font_size_excluding`]).
 const FOOTNOTE_FONT_FACTOR: f32 = 0.95;
 
+/// A block (or page) counts as "bold" once at least this fraction of its characters
+/// carry a bold font name (see [`is_bold_font_name`]) -- a dominant-fraction test rather
+/// than "any bold char," so a single bold run-in word inside an otherwise-regular
+/// paragraph doesn't get promoted, and a heading with one non-bold stray glyph still
+/// qualifies.
+const BOLD_CHAR_FRACTION: f32 = 0.8;
+
 /// Classifies every geometric [`crate::Block`] in `document` into a [`Region`], one
 /// region per block (in document order, page-major), using only heuristics over Stage
 /// 1's own geometry and text — no vision model. See the [module docs](self) for which
@@ -133,6 +140,7 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
 
     for page in &document.pages {
         let body_font_size = body_median_font_size(page);
+        let page_predominantly_bold = page_is_predominantly_bold(page);
         let mut seen_title = false;
 
         for block in &page.blocks {
@@ -144,6 +152,7 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
                 &page.blocks,
                 page.height,
                 body_font_size,
+                page_predominantly_bold,
                 repeated_band,
                 &mut seen_title,
             );
@@ -172,12 +181,15 @@ enum Band {
 /// the top); later oversized blocks fall back to [`RegionClass::SectionHeader`].
 /// `repeated_band` is `Some` when this block's band and (normalized) text were found to
 /// recur across consecutive pages by [`repeated_running_bands`] -- the strongest signal,
-/// checked first.
+/// checked first. `page_predominantly_bold` gates the bold-heading signal (see
+/// [`page_is_predominantly_bold`]): bold text only marks a heading when it stands out
+/// against the page's own body.
 fn classify_block(
     block: &Block,
     page_blocks: &[Block],
     page_height: f32,
     body_font_size: f32,
+    page_predominantly_bold: bool,
     repeated_band: Option<Band>,
     seen_title: &mut bool,
 ) -> (RegionClass, f32) {
@@ -236,7 +248,80 @@ fn classify_block(
         return (RegionClass::SectionHeader, 0.6);
     }
 
+    // A heading set in bold at body size has no font-size cue at all, so it needs its
+    // own signal below the size-based branch above. Guarded by
+    // `page_predominantly_bold` (bold only means something when it contrasts with the
+    // body), a line-count cap (same short-block rule as the size-based branch), a
+    // size floor (excludes bold captions/footnotes, which are smaller than body text),
+    // and a "doesn't end in sentence punctuation" check (headings aren't sentences).
+    // Never sets `seen_title`: a body-sized bold block is always a subheading, never
+    // the document title.
+    if !page_predominantly_bold
+        && block_is_bold(block)
+        && line_count <= SHORT_BLOCK_MAX_LINES
+        && font_size >= body_font_size
+        && !text.trim_end().ends_with(['.', '?', '!'])
+    {
+        return (RegionClass::SectionHeader, 0.55);
+    }
+
     (RegionClass::Text, 0.5)
+}
+
+/// Returns `true` if `name` (a PDF font's own name, e.g. `"Helvetica-Bold"` or
+/// `"ABCDEF+TimesNewRomanPS-BoldMT"`) looks like a bold weight. This is the honest
+/// ceiling for weight detection over this crate's extraction path: PDF exposes no
+/// numeric font-weight value here, only the font's own name, so a case-insensitive
+/// substring match against common weight keywords is what's available.
+fn is_bold_font_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["bold", "black", "heavy"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// The fraction of `chars`' font names that are bold (see [`is_bold_font_name`]), or
+/// `0.0` for an empty iterator.
+fn bold_char_fraction<'a>(chars: impl Iterator<Item = &'a crate::Char>) -> f32 {
+    let mut total = 0usize;
+    let mut bold = 0usize;
+    for c in chars {
+        total += 1;
+        if is_bold_font_name(&c.font_name) {
+            bold += 1;
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        bold as f32 / total as f32
+    }
+}
+
+/// Returns `true` if at least [`BOLD_CHAR_FRACTION`] of `block`'s characters carry a
+/// bold font name.
+fn block_is_bold(block: &Block) -> bool {
+    bold_char_fraction(
+        block
+            .lines
+            .iter()
+            .flat_map(|l| &l.words)
+            .flat_map(|w| &w.chars),
+    ) >= BOLD_CHAR_FRACTION
+}
+
+/// Returns `true` if at least [`BOLD_CHAR_FRACTION`] of `page`'s characters carry a bold
+/// font name -- the guard that keeps [`block_is_bold`] from firing on every block of a
+/// page that's simply set in a bold font throughout (a whole-page style choice, not a
+/// heading signal).
+fn page_is_predominantly_bold(page: &crate::Page) -> bool {
+    bold_char_fraction(
+        page.blocks
+            .iter()
+            .flat_map(|b| &b.lines)
+            .flat_map(|l| &l.words)
+            .flat_map(|w| &w.chars),
+    ) >= BOLD_CHAR_FRACTION
 }
 
 /// Vertical distance from `block` to the nearest other block on the page in the given
@@ -531,6 +616,15 @@ mod tests {
         }
     }
 
+    fn char_at_named(bbox: BBox, font_size: f32, font_name: &str) -> Char {
+        Char {
+            unicode: Some('x'),
+            bbox,
+            font_name: font_name.into(),
+            font_size,
+        }
+    }
+
     fn word(text: &str, bbox: BBox, font_size: f32) -> Word {
         // Repeat the char to give the block's/page's median enough weight to be
         // meaningful in tests -- one-char blocks would make every "body" text block's
@@ -544,11 +638,32 @@ mod tests {
         }
     }
 
+    fn word_named(text: &str, bbox: BBox, font_size: f32, font_name: &str) -> Word {
+        let chars = std::iter::repeat_n(
+            char_at_named(bbox, font_size, font_name),
+            text.chars().count().max(1),
+        )
+        .collect();
+        Word {
+            text: text.into(),
+            bbox,
+            chars,
+        }
+    }
+
     fn line(text: &str, bbox: BBox, font_size: f32) -> Line {
         Line {
             text: text.into(),
             bbox,
             words: vec![word(text, bbox, font_size)],
+        }
+    }
+
+    fn line_named(text: &str, bbox: BBox, font_size: f32, font_name: &str) -> Line {
+        Line {
+            text: text.into(),
+            bbox,
+            words: vec![word_named(text, bbox, font_size, font_name)],
         }
     }
 
@@ -1111,5 +1226,107 @@ mod tests {
         let regions = classify_regions(&doc);
 
         assert_eq!(regions[1].class, RegionClass::PageFooter);
+    }
+
+    #[test]
+    fn bold_body_sized_heading_is_section_header() {
+        // Same font size as the body -- the only signal here is the bold font name.
+        let heading = block(vec![line_named(
+            "Results and Discussion",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+            "Helvetica-Bold",
+        )]);
+        let body = block(vec![line(
+            "This section presents the results of the experiment in detail.",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 560.0,
+                top: 595.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![heading, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::SectionHeader);
+    }
+
+    #[test]
+    fn bold_heading_on_all_bold_page_is_not_promoted() {
+        // When the whole page is set in bold, boldness carries no heading signal --
+        // `page_is_predominantly_bold` must switch the branch off.
+        let heading = block(vec![line_named(
+            "Results and Discussion",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+            "Helvetica-Bold",
+        )]);
+        let body = block(vec![line_named(
+            "This section presents the results of the experiment in detail.",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 560.0,
+                top: 595.0,
+            },
+            10.0,
+            "Helvetica-Bold",
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![heading, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn bold_sentence_is_not_promoted() {
+        // Headings aren't sentences -- a bold block ending in sentence punctuation
+        // (e.g. an emphasized run-in sentence) should stay Text.
+        let sentence = block(vec![line_named(
+            "This is an important bold sentence.",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+            "Helvetica-Bold",
+        )]);
+        let body = block(vec![line(
+            "This section presents the results of the experiment in detail.",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 560.0,
+                top: 595.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![sentence, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
     }
 }
