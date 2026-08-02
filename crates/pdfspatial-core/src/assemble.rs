@@ -150,6 +150,18 @@ const MIN_GUTTER_EMS: f32 = 0.8;
 /// pathologically tiny median font size can't shrink the minimum gutter to near zero.
 const MIN_GUTTER_ABS_PT: f32 = 2.0;
 
+/// A block's median font size must be at least this multiple of another block's to be a
+/// candidate overlay of it (see [`xy_cut_order`]'s fallback ordering). A watermark or stamp
+/// is typically drawn much larger than the text it's stamped across; this keeps ordinary
+/// same-scale neighbors (a heading a couple of points larger than its body, say) from ever
+/// qualifying.
+const OVERLAY_FONT_SIZE_RATIO_MIN: f32 = 2.0;
+
+/// Two blocks' bounding-box intersection must cover at least this fraction of the smaller
+/// block's area for the larger-font one to count as drawn *across* the other, rather than
+/// merely adjacent to or barely clipping it.
+const OVERLAY_AREA_OVERLAP_FRACTION: f32 = 0.5;
+
 /// Reassembles a [`Document`]'s blocks into reading order via recursive, column-aware
 /// XY-cut segmentation, replacing Stage 1's naive top-to-bottom scan.
 ///
@@ -344,13 +356,75 @@ fn xy_cut_order(blocks: &mut Vec<Block>, params: &CutParams) {
         return;
     }
 
-    blocks.sort_by(|a, b| {
-        b.bbox
-            .top
-            .partial_cmp(&a.bbox.top)
-            .unwrap()
-            .then(a.bbox.left.partial_cmp(&b.bbox.left).unwrap())
+    // Neither cut qualifies: a watermark/stamp overlay's box can still beat a real block's
+    // on raw `top` (it's often the larger of the two), which would otherwise sort it first
+    // -- wrong for something drawn *across* existing content, not above it. Compute overlay
+    // status once per block against every other block in scope before sorting, since the
+    // ordinary top/left comparator can't see other blocks to make that call itself.
+    let geometry: Vec<(BBox, Option<f32>)> = blocks
+        .iter()
+        .map(|b| (b.bbox, block_font_size(b)))
+        .collect();
+    let is_overlay: Vec<bool> = geometry
+        .iter()
+        .enumerate()
+        .map(|(i, &(bbox, font_size))| {
+            geometry
+                .iter()
+                .enumerate()
+                .any(|(j, &(other_bbox, other_font_size))| {
+                    i != j && overlays(bbox, font_size, other_bbox, other_font_size)
+                })
+        })
+        .collect();
+
+    let mut tagged: Vec<(bool, Block)> = blocks
+        .drain(..)
+        .zip(is_overlay)
+        .map(|(b, o)| (o, b))
+        .collect();
+    tagged.sort_by(|(a_overlay, a), (b_overlay, b)| {
+        a_overlay.cmp(b_overlay).then_with(|| {
+            b.bbox
+                .top
+                .partial_cmp(&a.bbox.top)
+                .unwrap()
+                .then(a.bbox.left.partial_cmp(&b.bbox.left).unwrap())
+        })
     });
+    *blocks = tagged.into_iter().map(|(_, b)| b).collect();
+}
+
+/// `true` if `bbox` (with median font size `font_size`) reads as an overlay drawn across
+/// `other_bbox` (median font size `other_font_size`): its text is at least
+/// [`OVERLAY_FONT_SIZE_RATIO_MIN`] times larger, and their boxes intersect over at least
+/// [`OVERLAY_AREA_OVERLAP_FRACTION`] of the smaller box's area. `None` font sizes (a block
+/// with no character data, e.g. a hand-built test fixture) never qualify -- there's nothing
+/// to compare.
+fn overlays(
+    bbox: BBox,
+    font_size: Option<f32>,
+    other_bbox: BBox,
+    other_font_size: Option<f32>,
+) -> bool {
+    let (Some(font_size), Some(other_font_size)) = (font_size, other_font_size) else {
+        return false;
+    };
+    if font_size < other_font_size * OVERLAY_FONT_SIZE_RATIO_MIN {
+        return false;
+    }
+
+    let overlap_x = (bbox.right.min(other_bbox.right) - bbox.left.max(other_bbox.left)).max(0.0);
+    let overlap_y = (bbox.top.min(other_bbox.top) - bbox.bottom.max(other_bbox.bottom)).max(0.0);
+    let overlap_area = overlap_x * overlap_y;
+    if overlap_area <= 0.0 {
+        return false;
+    }
+
+    let smaller_area = (bbox.width() * bbox.height())
+        .min(other_bbox.width() * other_bbox.height())
+        .max(1.0);
+    overlap_area / smaller_area >= OVERLAY_AREA_OVERLAP_FRACTION
 }
 
 /// Finds the x-coordinate of the widest vertical whitespace gutter that separates

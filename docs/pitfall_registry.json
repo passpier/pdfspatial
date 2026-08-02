@@ -108,9 +108,9 @@
     "title": "Embedded/CID-keyed fonts and ligatures",
     "summary": "pdfium character extraction dropping or garbling glyphs from non-standard font encodings",
     "blocked": {
-      "reason": "Stage 1 extraction gaps (`requires_extraction_fix`)",
-      "unblocked_by": "Read PDFium's rotation matrix / encoding table / z-order in `extract.rs`",
-      "loop_refuses": false
+      "reason": "pdfium-render 0.9.3 (and PDFium's FPDF_TEXTPAGE API) expose no raw charcode, /Encoding, or /Differences accessor, so Stage 1 cannot re-resolve glyph-name-derived Unicode against the base encoding. Separately, the corpus case's `page` is a frozen extract_baseline snapshot, so an extract.rs fix cannot move the scoreboard until examples/stage3_pdf_cases.rs regenerates it.",
+      "unblocked_by": "A charcode-level PDF reader independent of PDFium (xref + FlateDecode + content-stream tokenizing + AGL), or an upstream pdfium-render API exposing per-char charcodes; then regenerate the PDF-backed snapshot.",
+      "loop_refuses": true
     },
     "pdf_backed_reason": "Needs a real custom-encoded/CID-keyed font to reproduce dropped/garbled glyphs."
   },

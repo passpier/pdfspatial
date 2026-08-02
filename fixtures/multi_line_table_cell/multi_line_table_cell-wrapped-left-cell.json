@@ -18,7 +18,8 @@
               162.04,
               709.05
             ],
-            "font_size": 10.0
+            "font_size": 10.0,
+            "font_name": "Helvetica"
           },
           {
             "text": "spans two table lines",
@@ -28,7 +29,8 @@
               164.82,
               695.05
             ],
-            "font_size": 10.0
+            "font_size": 10.0,
+            "font_name": "Helvetica"
           },
           {
             "text": "42",
@@ -38,7 +40,8 @@
               351.12,
               709.05
             ],
-            "font_size": 10.0
+            "font_size": 10.0,
+            "font_name": "Helvetica"
           }
         ]
       }

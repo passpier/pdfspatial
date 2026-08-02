@@ -3,7 +3,7 @@
   "source_pdf": "crates/pdfspatial-core/tests/fixtures/stage3/overlapping_text.pdf",
   "pitfall": "overlapping_text",
   "root_cause": "geometric",
-  "description": "A two-line body paragraph with a large 'DRAFT' watermark text object drawn across the same vertical band as the second line, both real z-ordered text objects in one content stream (not a synthetic pre-grouped block). Stage 1's line grouping has no z-order/overlap awareness, so the watermark's glyphs get spliced into the middle of the second line by x position ('Overlapping DRAFT text stress test line two.') instead of staying a separate overlay.",
+  "description": "A two-line body paragraph with a large 'DRAFT' watermark text object drawn across the same vertical band as the second line, both real z-ordered text objects in one content stream (not a synthetic pre-grouped block). Stage 1's line/block grouping now carries a font-size-ratio guard (group_lines) and a vertical-overlap guard (group_blocks) that keep the watermark from being spliced into or re-merged with the body text, and Stage 4's XY-cut fallback demotes a large-font block that overlays another rather than sorting it first by raw bbox top. The two body lines still group into one paragraph block (ordinary 14pt leading, correctly merged) -- `assemble_reading_order` reorders/merges blocks but never splits one, so that block staying intact is the correct, achievable behavior, not a residual defect.",
   "page": {
     "width": 612.0,
     "height": 792.0,
@@ -18,17 +18,34 @@
               266.08795,
               710.86
             ],
-            "font_size": 12.0
+            "font_size": 12.0,
+            "font_name": "Helvetica"
           },
           {
-            "text": "Overlapping DRAFT text stress test line two.",
+            "text": "Overlapping text stress test line two.",
             "bbox": [
               72.0,
-              676.56,
+              683.468,
               264.74396,
+              696.86
+            ],
+            "font_size": 12.0,
+            "font_name": "Helvetica"
+          }
+        ]
+      },
+      {
+        "lines": [
+          {
+            "text": "DRAFT",
+            "bbox": [
+              120.0,
+              676.56,
+              253.32,
               721.2
             ],
-            "font_size": 12.0
+            "font_size": 40.0,
+            "font_name": "Helvetica"
           }
         ]
       }
@@ -36,10 +53,8 @@
   },
   "expected": {
     "reading_order": [
-      "Overlapping text stress test line one.",
-      "Overlapping text stress test line two.",
+      "Overlapping text stress test line one.\nOverlapping text stress test line two.",
       "DRAFT"
-    ],
-    "requires_extraction_fix": true
+    ]
   }
 }

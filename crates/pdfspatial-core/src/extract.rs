@@ -68,6 +68,28 @@ const WORD_BASELINE_TOLERANCE_FACTOR: f32 = 0.2;
 /// the shorter line's height, starts a new block.
 const BLOCK_GAP_FACTOR: f32 = 1.5;
 
+/// A candidate line whose box vertically overlaps the running line's by more than this
+/// fraction of the shorter line's height starts a new block instead of attaching -- the
+/// line-level counterpart of [`BLOCK_GAP_FACTOR`]'s large-*gap* rejection, this is a
+/// large-*overlap* rejection. A large-font overlay text object (a watermark, a stamp) drawn
+/// across an existing line's band overlaps it almost entirely (the `overlapping_text`
+/// fixture's watermark line fully contains the body line's vertical span, a 1.0 fraction);
+/// this must stay well above what two ordinarily-touching lines ever produce, which is
+/// exactly 0 -- not merely small -- because [`vertical_overlap`] is signed zero-or-positive
+/// (touching or separated lines never register as overlapping) and a rotated run's stacked
+/// glyph boxes (see [`merge_rotated_text_runs`]) touch edge-to-edge with no overlap at all.
+const BLOCK_OVERLAP_REJECT_FRACTION: f32 = 0.5;
+
+/// A word whose font size differs from the running line's anchor by more than this ratio
+/// (in either direction) never joins that line, no matter how close their vertical centers
+/// sit. Ordinary inline size variation on one line of running text is modest, and
+/// super/subscripts are already absorbed a level down by [`is_script_continuation`] --
+/// [`word_font_size`] reports the *base* character's size for those, not the smaller
+/// script's. A jump this large (the watermark/body ratio in the `overlapping_text` fixture
+/// is ~3.3x) is a stamp or watermark text object whose center happens to land within
+/// [`LINE_Y_TOLERANCE_FACTOR`] of a real line, not a continuation of it.
+const LINE_FONT_SIZE_RATIO_MAX: f32 = 2.0;
+
 /// A character whose font size is at most this multiple of the previous character's is a
 /// candidate super/subscript rather than a new word. Real body text mixes sizes only at
 /// element boundaries (which carry a space or a large gap anyway), so this stays well
@@ -667,8 +689,9 @@ fn is_script_continuation(prev: &Char, ch: &Char) -> bool {
 /// Groups words into lines via baseline (vertical-center) tolerance clustering.
 ///
 /// Words are appended to the most recently opened line as long as their vertical center
-/// stays within [`LINE_Y_TOLERANCE_FACTOR`] times the font size of the running line; a
-/// larger vertical shift starts a new line. Within each finished line, words are ordered
+/// stays within [`LINE_Y_TOLERANCE_FACTOR`] times the font size of the running line and
+/// their font size is within [`LINE_FONT_SIZE_RATIO_MAX`] of the line's; a larger vertical
+/// shift or size mismatch starts a new line. Within each finished line, words are ordered
 /// left to right by their x-position, since PDF content-stream order does not guarantee
 /// horizontal ordering.
 fn group_lines(words: Vec<Word>) -> Vec<Line> {
@@ -677,9 +700,14 @@ fn group_lines(words: Vec<Word>) -> Vec<Line> {
     for word in words {
         let attaches_to_last = line_groups.last().is_some_and(|line| {
             let anchor = &line[0];
-            let font_size = word_font_size(&word).max(word_font_size(anchor)).max(1.0);
+            let word_size = word_font_size(&word);
+            let anchor_size = word_font_size(anchor);
+            let font_size = word_size.max(anchor_size).max(1.0);
             let tol = font_size * LINE_Y_TOLERANCE_FACTOR;
+            let size_ratio = word_size.max(anchor_size) / word_size.min(anchor_size).max(1.0);
+
             (center_y(word.bbox) - center_y(anchor.bbox)).abs() <= tol
+                && size_ratio <= LINE_FONT_SIZE_RATIO_MAX
         });
 
         if attaches_to_last {
@@ -705,9 +733,11 @@ fn finalize_line(mut words: Vec<Word>) -> Line {
 
 /// Groups consecutive lines into blocks via a vertical-gap heuristic: a gap between one
 /// line's bottom and the next line's top larger than [`BLOCK_GAP_FACTOR`] times the
-/// shorter line's height starts a new block. This is a naive, ML-free paragraph/column
-/// detector by design — see [`crate::assemble`] for where a real reading-order solver
-/// eventually replaces it.
+/// shorter line's height starts a new block, and so does the next line's box
+/// vertically overlapping the running one by more than [`BLOCK_OVERLAP_REJECT_FRACTION`]
+/// (an overlay drawn across the line rather than an adjacent line of the same paragraph).
+/// This is a naive, ML-free paragraph/column detector by design — see [`crate::assemble`]
+/// for where a real reading-order solver eventually replaces it.
 fn group_blocks(lines: Vec<Line>) -> Vec<Block> {
     let mut block_groups: Vec<Vec<Line>> = Vec::new();
 
@@ -716,7 +746,9 @@ fn group_blocks(lines: Vec<Line>) -> Vec<Block> {
             let prev = block.last().unwrap();
             let gap = prev.bbox.bottom - line.bbox.top;
             let shorter_height = prev.bbox.height().min(line.bbox.height()).max(1.0);
+            let overlap = vertical_overlap(&prev.bbox, &line.bbox);
             gap <= shorter_height * BLOCK_GAP_FACTOR
+                && overlap <= shorter_height * BLOCK_OVERLAP_REJECT_FRACTION
         });
 
         if attaches_to_last {
@@ -733,6 +765,14 @@ fn group_blocks(lines: Vec<Line>) -> Vec<Block> {
             Block { bbox, lines }
         })
         .collect()
+}
+
+/// The length of the vertical overlap between two boxes, in points, or 0.0 if they merely
+/// touch or are separated. Unlike [`BBox::vertically_overlaps`] (a same-baseline yes/no
+/// proxy), this returns a magnitude so callers can compare it against a fraction of a
+/// line's height.
+fn vertical_overlap(a: &BBox, b: &BBox) -> f32 {
+    (a.top.min(b.top) - a.bottom.max(b.bottom)).max(0.0)
 }
 
 fn union_all(mut boxes: impl Iterator<Item = BBox>) -> Option<BBox> {
@@ -945,6 +985,71 @@ mod tests {
         let blocks = group_chars_into_blocks(&chars);
 
         assert_eq!(blocks[0].text(), "x y");
+    }
+
+    /// A large watermark word whose vertical center happens to fall within
+    /// `LINE_Y_TOLERANCE_FACTOR` of a body line's must not join that line -- its font size
+    /// is far outside `LINE_FONT_SIZE_RATIO_MAX`, the telltale of an overlay rather than a
+    /// continuation. Geometry mirrors the `overlapping_text` fixture: a 12pt line centered
+    /// at y=689 next to a 40pt word centered at y=698.9 (9.9pt apart, comfortably inside the
+    /// 12pt line's own 5.4pt tolerance *and* the watermark's 18pt tolerance, so only the
+    /// size ratio can separate them). Exercises `group_lines` directly (rather than through
+    /// `group_chars_into_blocks`) since `group_blocks`'s own overlay guard is a separate
+    /// fix and this test should not depend on it.
+    #[test]
+    fn group_lines_rejects_a_watermark_word_despite_close_vertical_centers() {
+        let chars = vec![
+            char_at('a', 72.0, 683.0, 78.0, 695.0, 12.0),
+            char_at('W', 120.0, 685.0, 150.0, 725.0, 40.0),
+        ];
+
+        let words = group_words(&chars);
+        let lines = group_lines(words);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "a");
+        assert_eq!(lines[1].text, "W");
+    }
+
+    /// A rotated run's stacked glyph boxes touch edge-to-edge (each glyph's bottom equals
+    /// the next's top, mirroring the real `rotated_text` fixture's sidebar column) and must
+    /// stay in one block for `merge_rotated_text_runs` to repair -- `BLOCK_OVERLAP_REJECT_FRACTION`
+    /// must not fire on zero actual overlap just because the naive `gap` arithmetic reads
+    /// deeply negative for a column stacked in ascending y (each glyph's `top` is *above*
+    /// the previous glyph's `bottom`, the opposite of the descending order the plain gap
+    /// check assumes).
+    #[test]
+    fn group_blocks_keeps_a_touching_rotated_glyph_column_in_one_block() {
+        let chars = vec![
+            char_at('S', 550.95, 620.0, 562.11, 626.67, 10.0),
+            char_at('I', 550.95, 626.67, 562.11, 629.45, 10.0),
+            char_at('D', 550.95, 629.45, 562.11, 636.67, 10.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].lines.len(), 3);
+    }
+
+    /// Once `group_lines` has correctly split a watermark word onto its own line (previous
+    /// test), `group_blocks` must not immediately re-merge it: its box substantially
+    /// overlaps the line above (a large-font overlay, not touching leading), which should
+    /// start a new block rather than pass the ordinary `BLOCK_GAP_FACTOR` gap check --
+    /// negative gaps from adjacent same-size lines are near zero, not multiples of a line
+    /// height, so this must not regress `group_chars_into_blocks_groups_one_line_into_one_block`.
+    #[test]
+    fn group_blocks_rejects_a_line_overlapping_the_previous_one() {
+        let chars = vec![
+            char_at('a', 72.0, 683.0, 78.0, 695.0, 12.0),
+            char_at('W', 120.0, 685.0, 150.0, 725.0, 40.0),
+        ];
+
+        let blocks = group_chars_into_blocks(&chars);
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text(), "a");
+        assert_eq!(blocks[1].text(), "W");
     }
 
     /// Builds a single-glyph [`Line`] the way `group_lines` would leave one after
