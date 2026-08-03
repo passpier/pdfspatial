@@ -1,20 +1,23 @@
 //! Stage 2/4: layout region classification.
 //!
-//! [`classify_regions`] implements a **deterministic, text-layer-only heuristic**
-//! classifier — the roadmap's Stage 4a "heuristics first" approach — rather than the
-//! ONNX RT-DETR detector described in the roadmap's Stage 2/4b design intent. That
-//! detector needs an inference runtime, model weights, and a vision signal
-//! ([`crate::extract::render_pages_parallel`] produces the page rasters it would
-//! consume) and remains unimplemented; it is the one part of this crate's Stage 2/4
-//! surface that isn't a pure algorithm.
+//! [`classify_regions`] combines two independent, deterministic signals -- no vision
+//! model or inference runtime involved:
 //!
-//! Because the heuristic only has geometry, font metrics, and text to work with, it can
-//! only ever emit the classes derivable from those signals: [`RegionClass::Title`],
-//! [`RegionClass::SectionHeader`], [`RegionClass::ListItem`], [`RegionClass::Caption`],
-//! [`RegionClass::PageHeader`], [`RegionClass::PageFooter`], [`RegionClass::Footnote`],
-//! and [`RegionClass::Text`]. [`RegionClass::Table`], [`RegionClass::Picture`], and
-//! [`RegionClass::Formula`] require a genuine layout/vision model and are never produced
-//! here — see the module docs above for why.
+//! - A **text-layer-only heuristic** classifier (the roadmap's Stage 4a "heuristics
+//!   first" approach) over geometry, font metrics, and text, emitting
+//!   [`RegionClass::Title`], [`RegionClass::SectionHeader`], [`RegionClass::ListItem`],
+//!   [`RegionClass::Caption`], [`RegionClass::PageHeader`], [`RegionClass::PageFooter`],
+//!   [`RegionClass::Footnote`], and [`RegionClass::Text`].
+//! - A **graphics-layer** pass ([`crate::graphics::detect_table_regions`],
+//!   [`crate::graphics::detect_picture_regions`]), run first over each page's
+//!   [`crate::Graphic`]s (ruling lines, images, fills), emitting
+//!   [`RegionClass::Table`] and [`RegionClass::Picture`]. A block whose center falls
+//!   inside a detected table or picture is excluded from the text-layer pass so it
+//!   isn't double-classified.
+//!
+//! [`RegionClass::Formula`] still requires a genuine layout/vision model -- inline
+//! formula segmentation needs more than ruling lines or geometry can offer -- and is
+//! never produced here; see `docs/pitfall_registry.json`'s `nested_formula` entry.
 //!
 //! [`RegionClass::PageHeader`]/[`RegionClass::PageFooter`] come from two independent
 //! signals, either of which is sufficient: a single-page geometric shape test (thin
@@ -143,7 +146,23 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
         let page_predominantly_bold = page_is_predominantly_bold(page);
         let mut seen_title = false;
 
+        let table_regions = crate::graphics::detect_table_regions(&page.graphics, page);
+        let picture_regions = crate::graphics::detect_picture_regions(&page.graphics, page);
+
         for block in &page.blocks {
+            // A block claimed by the graphics layer (its center sits inside a detected
+            // table or picture) is excluded from the text-layer heuristic entirely --
+            // its content is represented by the table/picture region itself, not by a
+            // separate per-block region. See `crate::serialize` for how a table's member
+            // blocks are folded back into one rendered GFM table.
+            let claimed_by_graphics = table_regions
+                .iter()
+                .chain(&picture_regions)
+                .any(|r| r.bbox.contains_center(&block.bbox));
+            if claimed_by_graphics {
+                continue;
+            }
+
             let repeated_band = band_of(block, page.height).filter(|band| {
                 repeated_bands.contains(&(*band, normalize_running_text(&block.text())))
             });
@@ -162,6 +181,9 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
                 confidence,
             });
         }
+
+        regions.extend(table_regions);
+        regions.extend(picture_regions);
     }
 
     regions
@@ -613,6 +635,7 @@ mod tests {
             bbox,
             font_name: "Test".into(),
             font_size,
+            ..Default::default()
         }
     }
 
@@ -622,6 +645,7 @@ mod tests {
             bbox,
             font_name: font_name.into(),
             font_size,
+            ..Default::default()
         }
     }
 
@@ -682,6 +706,7 @@ mod tests {
             width: 612.0,
             height: 792.0,
             blocks,
+            ..Default::default()
         }
     }
 
@@ -694,6 +719,7 @@ mod tests {
             width: 600.0,
             height,
             blocks,
+            ..Default::default()
         }
     }
 
@@ -1328,5 +1354,89 @@ mod tests {
         let regions = classify_regions(&doc);
 
         assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    fn h_line(y: f32, left: f32, right: f32) -> crate::Graphic {
+        crate::Graphic {
+            kind: crate::GraphicKind::Stroke,
+            bbox: BBox {
+                left,
+                bottom: y,
+                right,
+                top: y,
+            },
+            z: 0,
+            stroke_width: 1.0,
+            is_stroked: true,
+            is_filled: false,
+        }
+    }
+
+    fn v_line(x: f32, bottom: f32, top: f32) -> crate::Graphic {
+        crate::Graphic {
+            kind: crate::GraphicKind::Stroke,
+            bbox: BBox {
+                left: x,
+                bottom,
+                right: x,
+                top,
+            },
+            z: 0,
+            stroke_width: 1.0,
+            is_stroked: true,
+            is_filled: false,
+        }
+    }
+
+    #[test]
+    fn block_inside_a_detected_table_is_not_separately_classified() {
+        let cell_bbox = BBox {
+            left: 45.0,
+            bottom: 65.0,
+            right: 115.0,
+            top: 95.0,
+        };
+        let cell = block(vec![line("Ada", cell_bbox, 10.0)]);
+
+        let mut p = page(vec![cell]);
+        p.graphics = vec![
+            h_line(100.0, 40.0, 200.0),
+            h_line(60.0, 40.0, 200.0),
+            v_line(40.0, 60.0, 100.0),
+            v_line(120.0, 60.0, 100.0),
+            v_line(200.0, 60.0, 100.0),
+        ];
+        let doc = Document { pages: vec![p] };
+
+        let regions = classify_regions(&doc);
+
+        // Exactly one region: the table itself. The cell's own block never gets a
+        // separate Text/whatever region -- it's represented by the table region only.
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].class, RegionClass::Table);
+    }
+
+    #[test]
+    fn image_graphic_is_classified_as_picture_region() {
+        let mut p = page(vec![]);
+        p.graphics = vec![crate::Graphic {
+            kind: crate::GraphicKind::Image,
+            bbox: BBox {
+                left: 40.0,
+                bottom: 40.0,
+                right: 200.0,
+                top: 200.0,
+            },
+            z: 0,
+            stroke_width: 0.0,
+            is_stroked: false,
+            is_filled: true,
+        }];
+        let doc = Document { pages: vec![p] };
+
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].class, RegionClass::Picture);
     }
 }

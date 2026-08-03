@@ -2,13 +2,16 @@
   "id": "figure_caption-picture-placeholder-not-classified",
   "pitfall": "figure_caption",
   "root_cause": "classification",
-  "description": "A figure region (here a text stand-in for an image, since this corpus can't encode real raster content) followed by its caption. The caption's own heuristic (is_caption) already recognizes the 'Figure N' prefix correctly, but the figure region itself has no heuristic at all -- RegionClass::Picture requires the still-unimplemented vision detector -- so it defaults to RegionClass::Text instead of being linked to its caption as a Picture.",
+  "description": "A figure region (here a text stand-in for an image, since this corpus can't encode real raster content) followed by its caption, with a synthetic `graphics` Image entry over the figure's bbox standing in for a real embedded raster. The caption's own heuristic (is_caption) already recognizes the 'Figure N' prefix correctly; the figure region itself is now detected by graphics::detect_picture_regions (Stage 1b) from the Image graphic, not a vision model. Associating the caption with *which* picture (when multiple figures share a page) is still open -- see figure_caption-multiple-figures-share-a-page.",
   "page": {
     "width": 600.0,
     "height": 800.0,
     "blocks": [
       { "lines": [ { "text": "Bar chart depicting quarterly revenue by region.", "bbox": [40.0, 600.0, 560.0, 700.0], "font_size": 10.0 } ] },
       { "lines": [ { "text": "Figure 1: Quarterly revenue by region.", "bbox": [40.0, 580.0, 560.0, 595.0], "font_size": 9.0 } ] }
+    ],
+    "graphics": [
+      { "kind": "image", "bbox": [40.0, 600.0, 560.0, 700.0], "is_stroked": false, "is_filled": true }
     ]
   },
   "expected": {

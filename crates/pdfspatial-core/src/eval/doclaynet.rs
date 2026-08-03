@@ -449,6 +449,7 @@ pub fn document_from_cells(page: &DocLayNetPage) -> Document {
                     bbox: cell.bbox,
                     font_name: "DocLayNet".to_string(),
                     font_size: cell.font_size,
+                    ..Default::default()
                 })
                 .collect();
             let word = Word {
@@ -474,6 +475,7 @@ pub fn document_from_cells(page: &DocLayNetPage) -> Document {
             width: page.width,
             height: page.height,
             blocks,
+            ..Default::default()
         }],
     }
 }
@@ -506,6 +508,7 @@ pub fn document_from_cells_grouped(page: &DocLayNetPage) -> Document {
                 bbox: cell.bbox,
                 font_name: "DocLayNet".to_string(),
                 font_size,
+                ..Default::default()
             })
         })
         .collect();
@@ -518,6 +521,7 @@ pub fn document_from_cells_grouped(page: &DocLayNetPage) -> Document {
             width: page.width,
             height: page.height,
             blocks,
+            ..Default::default()
         }],
     }
 }

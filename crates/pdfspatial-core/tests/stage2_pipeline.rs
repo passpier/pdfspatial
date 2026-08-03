@@ -19,6 +19,7 @@ fn char_run(text: &str, bbox: BBox, font_size: f32) -> Vec<Char> {
             bbox,
             font_name: "Test".into(),
             font_size,
+            ..Default::default()
         })
         .collect()
 }
@@ -73,6 +74,7 @@ fn synthetic_two_column_page() -> Page {
         height: 800.0,
         // Deliberately out of reading order: right column before left.
         blocks: vec![title, right, left],
+        ..Default::default()
     }
 }
 

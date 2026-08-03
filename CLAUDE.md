@@ -11,9 +11,18 @@ serialization) grounded in spatial (bounding-box) extraction rather than layout 
 - Stage 1 (baseline extraction) and the algorithmic core of Stages 2/4 (metrics, heuristic layout
   classifier, XY-cut reading-order assembly, Markdown serializer) are fully implemented, pure,
   dependency-free Rust — no ML runtime involved.
-- The vision-model layout detector (ONNX RT-DETR, for `Table`/`Picture`/`Formula` region classes)
-  is an intentional, documented `unimplemented!()` stub — it's out of scope by design, not a bug
-  or a TODO to silently fill in.
+- Stage 1b (`extract::extract_graphics`, `graphics.rs`) pulls non-text page objects (ruling
+  lines, images, fills) from PDFium's page-object API and deterministically detects `Table`
+  and `Picture` regions from them — no vision model needed for those two classes. This closed
+  a real gap: earlier revisions of this doc (and `docs/pitfall_registry.json`) claimed `Table`/
+  `Picture`/`Formula` were all unreachable without a vision model, which was true only because
+  `extract.rs` used to consume just PDFium's text layer (`page.text()`), never its page-object
+  API (`page.objects()`) — an unused-API gap, not a fundamental PDFium limitation.
+- `RegionClass::Formula` is the one region class still genuinely vision-model-shaped: a formula
+  has no ruling-line or XObject signal to key a geometric heuristic off, unlike a table or
+  picture. The ONNX RT-DETR layout detector the roadmap's Stage 4b describes for it remains
+  unimplemented and out of scope by design — not a bug or a TODO to silently fill in. (There is
+  no literal `unimplemented!()` in the source; the gap is simply the absence of that code path.)
 - Propose a plan before implementing non-trivial changes rather than diving straight into code.
 
 ## Build, test, lint

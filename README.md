@@ -15,10 +15,12 @@ wrapper around Google's PDFium engine), then uses that spatial information —
 not heuristic guesswork — to classify regions, reconstruct reading order, and
 serialize structured Markdown.
 
-This repo ships one crate, [`pdfspatial-core`](crates/pdfspatial-core). Today
-it can reliably extract text with bounding boxes and reassemble multi-column
-reading order; table/figure/formula *detection* (the vision-model stage) is
-an intentional, documented stub — see [Status](#status).
+This repo ships one crate, [`pdfspatial-core`](crates/pdfspatial-core). It
+reliably extracts text with bounding boxes, reassembles multi-column reading
+order, and detects tables and pictures from a page's non-text graphics (ruling
+lines, embedded images) — all deterministic, dependency-free geometry, no
+OCR and no vision model. Only formula detection remains genuinely
+model-shaped — see [Status](#status).
 
 ## Status
 
@@ -27,12 +29,13 @@ an intentional, documented stub — see [Status](#status).
 | Bounding-box text extraction (char → word → line → block) | ✅ Stable |
 | Reading-order assembly (column-aware XY-cut) | ✅ Stable |
 | Heuristic layout classification (Title, Header, List, Caption, ...) | ✅ Stable |
-| Structural Markdown serialization | ✅ Stable |
+| Table/picture detection from ruling lines & embedded images (`graphics`) | ✅ Stable |
+| Structural Markdown serialization (incl. GFM tables, image placeholders) | ✅ Stable |
 | Validation metrics (TEDS, GIoU, region F1) against DocLayNet | ✅ Stable |
 <!-- BEGIN GENERATED: pitfall-status-row -->
 | Regression corpus of known failure modes (26 seeded cases) | ✅ Stable |
 <!-- END GENERATED: pitfall-status-row -->
-| Vision-model region detection (`Table`/`Picture`/`Formula`) | 📋 Planned — documented `unimplemented!()` stub, needs an ONNX runtime + model weights, out of scope for now |
+| Formula detection (`RegionClass::Formula`) | 📋 Planned — needs an ONNX runtime + model weights, out of scope for now; unlike tables/pictures, a formula has no ruling-line/XObject signal to key a heuristic off |
 
 See [`docs/PDF-to-Markdown Pipeline Roadmap.md`](docs/PDF-to-Markdown%20Pipeline%20Roadmap.md)
 for the full stage-by-stage plan, metrics, and exit criteria behind this table.
@@ -92,21 +95,25 @@ cargo run --example basic_extract -- path/to/input.pdf
 ## How it works
 
 ```
-PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region classification]
+PDF → [pdfium: char/word bboxes + page graphics] → [Layout: text heuristics + graphics-layer table/picture detection]
     → [Reading-order assembly] → [Markdown serializer] → .md
 ```
 
 1. **Extract** — pull every character's bounding box straight from PDFium's
-   text layer, then group chars → words → lines → blocks geometrically. No
-   OCR, no ML. (`extract.rs`)
+   text layer, then group chars → words → lines → blocks geometrically; also
+   pull every non-text page object (ruling lines, images, fills) as a
+   `Graphic`. No OCR, no ML. (`extract.rs`)
 2. **Classify** — assign each block a region type (Title, Section Header,
-   List Item, Caption, ...) using deterministic text-layer heuristics.
-   (`layout.rs`)
+   List Item, Caption, ...) using deterministic text-layer heuristics, and
+   detect `Table`/`Picture` regions from ruling lines and embedded images
+   (`layout.rs`, `graphics.rs`).
 3. **Assemble** — reorder blocks into correct reading order with a
    column-aware recursive XY-cut, so multi-column pages don't read
    left-then-right across the gutter. (`assemble.rs`)
 4. **Serialize** — emit structured Markdown from the classified, ordered
-   blocks. (`serialize.rs`)
+   blocks — headings, lists, captions, footnotes, GFM pipe tables
+   reconstructed from a table's ruling-line grid, and image placeholders.
+   (`serialize.rs`)
 
 Accuracy is tracked against the [DocLayNet](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1)
 dataset (TEDS, GIoU, per-class F1), and known failure modes (multi-column
@@ -125,7 +132,8 @@ how the loop closes — see the [roadmap doc](docs/PDF-to-Markdown%20Pipeline%20
   pipeline.
 - **[PDFium](https://pdfium.googlesource.com/pdfium/)** via
   [`pdfium-render`](https://docs.rs/pdfium-render) — Google's production PDF
-  renderer, for character-level bounding boxes and page rasters.
+  renderer, for character-level bounding boxes, page rasters, and non-text
+  page objects (ruling lines, images) via its page-object API.
 - **[DocLayNet](https://huggingface.co/datasets/docling-project/DocLayNet-v1.1)** —
   human-annotated layout dataset used to validate classification accuracy
   (opt-in via the `doclaynet` feature).

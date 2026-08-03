@@ -5,7 +5,11 @@
 //! on-page bounding box. The stages are:
 //!
 //! 1. **Baseline extraction** (implemented) — a deterministic, OCR-free text extraction
-//!    floor built directly on PDFium's native text layer. See [`extract`].
+//!    floor built directly on PDFium's native text layer, plus a graphics-layer pass
+//!    ([`extract::extract_graphics`]) over PDFium's non-text page objects (ruling lines,
+//!    images, fills) that [`graphics::detect_table_regions`]/
+//!    [`graphics::detect_picture_regions`] key `Table`/`Picture` detection off. See
+//!    [`extract`].
 //! 2. **Validation** — structural-fidelity scoring: [`metrics::giou`],
 //!    [`metrics::region_f1`], and the TEDS family ([`metrics::teds_struct`],
 //!    [`metrics::teds`], [`metrics::teds_iou`]) are pure, tested functions, aggregated
@@ -20,12 +24,14 @@
 //!    model fine-tuning second.
 //!
 //! Stage 1 is fully implemented, and Stage 2/4's *algorithmic* core — validation
-//! metrics, a heuristic layout classifier, XY-cut reading-order assembly, and structural
-//! Markdown output ([`serialize::to_markdown_structured`]) — is implemented as pure,
-//! dependency-free Rust. The one piece still unimplemented is the vision-model layout
-//! detector the roadmap describes for Stage 2/4b (an ONNX RT-DETR-style detector over
-//! rendered page rasters); see [`layout`] for why that's a fundamentally different kind
-//! of work than the rest of this crate.
+//! metrics, a heuristic layout classifier plus graphics-layer table/picture detection
+//! ([`graphics`]), XY-cut reading-order assembly, and structural Markdown output
+//! ([`serialize::to_markdown_structured`], including GFM tables and image placeholders)
+//! — is implemented as pure, dependency-free Rust; no vision model is involved. The one
+//! region class still unimplemented is [`layout::RegionClass::Formula`], via the
+//! roadmap's Stage 2/4b vision-model layout detector (an ONNX RT-DETR-style detector
+//! over rendered page rasters) — see [`layout`] for why a formula, unlike a table or
+//! picture, has no non-text page-object signal to key a heuristic off.
 //!
 //! # Quick start
 //!
@@ -48,6 +54,7 @@
 pub mod assemble;
 pub mod eval;
 pub mod extract;
+pub mod graphics;
 pub mod layout;
 pub mod metrics;
 pub mod serialize;
@@ -133,6 +140,17 @@ impl BBox {
     pub fn vertically_overlaps(&self, other: &BBox) -> bool {
         self.bottom < other.top && other.bottom < self.top
     }
+
+    /// Returns `true` if `other`'s center point falls within `self`'s extent (inclusive
+    /// of the boundary). Used to test membership of a small box (e.g. a text block)
+    /// inside a larger one (e.g. a detected table or picture region) without requiring
+    /// full containment, since a block on a table's edge may extend a point or two past
+    /// the table's own ruling lines.
+    pub fn contains_center(&self, other: &BBox) -> bool {
+        let cx = (other.left + other.right) / 2.0;
+        let cy = (other.bottom + other.top) / 2.0;
+        self.left <= cx && cx <= self.right && self.bottom <= cy && cy <= self.top
+    }
 }
 
 /// A single extracted character, tied to its glyph, font, and on-page position.
@@ -150,6 +168,37 @@ pub struct Char {
     pub font_name: String,
     /// Font size in points, as scaled on the page.
     pub font_size: f32,
+    /// The font's declared weight (e.g. `400` regular, `700` bold), if the font program
+    /// exposes one. `None` when PDFium can't resolve a weight (many fonts don't declare
+    /// one), in which case [`crate::layout::is_bold_font_name`]'s name-based heuristic is
+    /// the only remaining signal.
+    pub font_weight: Option<u32>,
+    /// The glyph's rotation, in degrees counter-clockwise from upright text. `0.0` for
+    /// ordinary horizontal text. Defaults to `0.0` when PDFium can't report an angle
+    /// (e.g. characters synthesized outside real extraction, as in the Stage 3 synthetic
+    /// corpus) rather than failing extraction over a cosmetic signal.
+    pub angle_degrees: f32,
+    /// The character's fill color as `(r, g, b, a)`, `0-255` per channel. Defaults to
+    /// opaque black (`(0, 0, 0, 255)`) when PDFium can't report a color.
+    pub fill_color: (u8, u8, u8, u8),
+}
+
+impl Default for Char {
+    /// A blank, opaque-black, upright character at the page origin. Existing call sites
+    /// that predate `font_weight`/`angle_degrees`/`fill_color` can add `..Default::default()`
+    /// to a literal that already sets `unicode`/`bbox`/`font_name`/`font_size` to pick up
+    /// sensible values for the rest without touching every construction site by hand.
+    fn default() -> Self {
+        Char {
+            unicode: None,
+            bbox: BBox::ZERO,
+            font_name: String::new(),
+            font_size: 0.0,
+            font_weight: None,
+            angle_degrees: 0.0,
+            fill_color: (0, 0, 0, 255),
+        }
+    }
 }
 
 /// A run of [`Char`]s grouped into a word by x-gap thresholding.
@@ -197,6 +246,46 @@ impl Block {
     }
 }
 
+/// What kind of mark a [`Graphic`] represents on the page.
+///
+/// Derived from PDFium's `PdfPageObjectType`, collapsed to the categories the Stage 1b
+/// graphics layer actually distinguishes between. Text objects are deliberately excluded
+/// here — they already flow through [`Char`]/[`Word`]/[`Line`]/[`Block`], and counting
+/// them again as graphics would double-count ink when [`crate::graphics`] unions bboxes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicKind {
+    /// A stroked path segment (a ruling line, a table border, an underline).
+    Stroke,
+    /// A filled path (a shaded box, a highlight, a solid-color rule).
+    Fill,
+    /// A raster or form XObject (an embedded photo, chart, or scanned figure).
+    Image,
+    /// A shading pattern (a gradient fill).
+    Shading,
+}
+
+/// A single non-text mark on the page: a vector path, image, or shading.
+///
+/// This is the signal PDFium's text layer alone can't provide: ruling lines that key
+/// table-grid detection, image placeholders for figures, and z-order for resolving
+/// overlapping content. See [`crate::graphics`] for what's built from it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Graphic {
+    /// What kind of mark this is.
+    pub kind: GraphicKind,
+    /// The graphic's bounding box in page space.
+    pub bbox: BBox,
+    /// This graphic's index among the page's objects, in PDFium's own object order --
+    /// which is paint order, so a higher `z` was drawn (and so visually sits) on top.
+    pub z: usize,
+    /// The stroke width in points, `0.0` for unstroked graphics.
+    pub stroke_width: f32,
+    /// Whether this graphic is stroked (has a visible outline).
+    pub is_stroked: bool,
+    /// Whether this graphic is filled (has a visible interior).
+    pub is_filled: bool,
+}
+
 /// A single extracted page.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
@@ -209,6 +298,26 @@ pub struct Page {
     /// Geometric blocks on this page, in raw reading order
     /// (top-to-bottom, left-to-right; see [`extract`] for the exact rule).
     pub blocks: Vec<Block>,
+    /// Non-text marks on this page (vector paths, images, shadings), in PDFium's paint
+    /// order. Empty for pages built without a graphics-object pass (e.g. most of the
+    /// Stage 3 synthetic corpus, which authors [`Block`]s directly).
+    pub graphics: Vec<Graphic>,
+}
+
+impl Default for Page {
+    /// An empty page at the origin with no graphics. Existing call sites that predate
+    /// `graphics` can add `..Default::default()` to a literal that already sets
+    /// `index`/`width`/`height`/`blocks` to pick up an empty graphics list without
+    /// touching every construction site by hand.
+    fn default() -> Self {
+        Page {
+            index: 0,
+            width: 0.0,
+            height: 0.0,
+            blocks: Vec::new(),
+            graphics: Vec::new(),
+        }
+    }
 }
 
 impl Page {
@@ -245,7 +354,7 @@ impl Document {
     /// let word = Word { text: "Hello".into(), bbox: BBox::ZERO, chars: vec![] };
     /// let line = Line { text: "Hello".into(), bbox: BBox::ZERO, words: vec![word] };
     /// let block = Block { bbox: BBox::ZERO, lines: vec![line] };
-    /// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block] };
+    /// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block], ..Default::default() };
     /// let doc = Document { pages: vec![page] };
     ///
     /// assert_eq!(doc.reading_order_text(), "Hello");

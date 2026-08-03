@@ -43,7 +43,7 @@
 
 use crate::assemble::{Pitfall, RootCause, assemble_reading_order};
 use crate::layout::{RegionClass, classify_regions};
-use crate::{BBox, Block, Char, Document, Line, Page, Word};
+use crate::{BBox, Block, Char, Document, Graphic, GraphicKind, Line, Page, Word};
 use std::path::{Path, PathBuf};
 
 /// Errors returned by [`load_case`] and [`load_corpus`].
@@ -76,6 +76,9 @@ pub enum CorpusError {
     /// An `expected.classes[].class` field didn't match any known [`RegionClass`] slug.
     #[error("unknown region class slug {0:?}")]
     UnknownClass(String),
+    /// A `graphics[].kind` field didn't match any known [`GraphicKind`] slug.
+    #[error("unknown graphic kind slug {0:?}")]
+    UnknownGraphicKind(String),
     /// Two blocks in the same case's `page.blocks` had identical text, so
     /// `expected.classes[].block_text`/`expected.reading_order` entries can't
     /// unambiguously identify a single block.
@@ -224,6 +227,38 @@ struct PageFile {
     width: f32,
     height: f32,
     blocks: Vec<BlockFile>,
+    /// Non-text page objects (ruling lines, images, fills) -- see [`crate::graphics`].
+    /// Optional and empty by default: most cases predate this field and don't exercise
+    /// the graphics-layer table/picture detection at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    graphics: Vec<GraphicFile>,
+}
+
+/// On-disk form of a single [`crate::Graphic`], authored directly (no COCO-style
+/// conversion needed -- these are hand-authored in the crate's own bottom-left-origin
+/// space, same as [`LineFile::bbox`]). `z` defaults to the graphic's position within its
+/// page's `graphics` array, since a hand-authored case rarely needs to control paint
+/// order explicitly.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct GraphicFile {
+    kind: String,
+    bbox: [f32; 4],
+    #[serde(default)]
+    z: Option<usize>,
+    #[serde(default = "default_stroke_width")]
+    stroke_width: f32,
+    #[serde(default = "default_true")]
+    is_stroked: bool,
+    #[serde(default)]
+    is_filled: bool,
+}
+
+fn default_stroke_width() -> f32 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One geometric block, authored as one or more lines so cases can control
@@ -318,6 +353,26 @@ pub fn pitfall_slug(pitfall: Pitfall) -> &'static str {
     }
 }
 
+fn graphic_kind_from_slug(slug: &str) -> Result<GraphicKind, CorpusError> {
+    Ok(match slug {
+        "stroke" => GraphicKind::Stroke,
+        "fill" => GraphicKind::Fill,
+        "image" => GraphicKind::Image,
+        "shading" => GraphicKind::Shading,
+        other => return Err(CorpusError::UnknownGraphicKind(other.to_string())),
+    })
+}
+
+/// The canonical slug for a [`GraphicKind`], the inverse of [`graphic_kind_from_slug`].
+fn graphic_kind_slug(kind: GraphicKind) -> &'static str {
+    match kind {
+        GraphicKind::Stroke => "stroke",
+        GraphicKind::Fill => "fill",
+        GraphicKind::Image => "image",
+        GraphicKind::Shading => "shading",
+    }
+}
+
 fn root_cause_from_slug(slug: &str) -> Result<RootCause, CorpusError> {
     Ok(match slug {
         "geometric" => RootCause::Geometric,
@@ -407,7 +462,7 @@ pub fn load_case(path: &Path) -> Result<RegressionCase, CorpusError> {
             });
         }
     };
-    let document = document_from_pages(&pages);
+    let document = document_from_pages(&pages)?;
 
     let mut seen_texts = std::collections::HashSet::new();
     for page in &document.pages {
@@ -493,7 +548,12 @@ fn collect_json_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), CorpusEr
 /// several lines per block. A block's own bbox is the union of its lines' bboxes, the
 /// same invariant [`crate::extract`]'s real block grouping maintains. `Page::index` is
 /// assigned by position in `pages`.
-fn document_from_pages(pages: &[PageFile]) -> Document {
+///
+/// # Errors
+///
+/// Returns [`CorpusError::UnknownGraphicKind`] if any `graphics[].kind` doesn't match a
+/// known [`GraphicKind`] slug.
+fn document_from_pages(pages: &[PageFile]) -> Result<Document, CorpusError> {
     let pages = pages
         .iter()
         .enumerate()
@@ -523,6 +583,7 @@ fn document_from_pages(pages: &[PageFile]) -> Document {
                                         .clone()
                                         .unwrap_or_else(|| "Stage3Corpus".to_string()),
                                     font_size: line_file.font_size,
+                                    ..Default::default()
                                 })
                                 .collect();
                             let word = Word {
@@ -548,16 +609,38 @@ fn document_from_pages(pages: &[PageFile]) -> Document {
                 })
                 .collect();
 
-            Page {
+            let graphics = page
+                .graphics
+                .iter()
+                .enumerate()
+                .map(|(z, g)| {
+                    Ok(Graphic {
+                        kind: graphic_kind_from_slug(&g.kind)?,
+                        bbox: BBox {
+                            left: g.bbox[0],
+                            bottom: g.bbox[1],
+                            right: g.bbox[2],
+                            top: g.bbox[3],
+                        },
+                        z: g.z.unwrap_or(z),
+                        stroke_width: g.stroke_width,
+                        is_stroked: g.is_stroked,
+                        is_filled: g.is_filled,
+                    })
+                })
+                .collect::<Result<Vec<_>, CorpusError>>()?;
+
+            Ok(Page {
                 index,
                 width: page.width,
                 height: page.height,
                 blocks,
-            }
+                graphics,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, CorpusError>>()?;
 
-    Document { pages }
+    Ok(Document { pages })
 }
 
 // --- Checking ------------------------------------------------------------------
@@ -617,11 +700,25 @@ pub fn evaluate_case(case: &RegressionCase) -> CaseOutcome {
             .collect();
 
         for expected_class in &case.expected.classes {
+            // `regions` is no longer 1:1 positional with `blocks`: a block claimed by
+            // the graphics layer (see `layout::classify_regions`) gets no per-block
+            // region of its own -- it's represented only by the table/picture region
+            // that contains it. So look a matching block up by its own bbox first
+            // (the common case, one region per block), falling back to "which
+            // table/picture region's bbox contains this block's center" for a
+            // graphics-claimed block.
             let actual = blocks
                 .iter()
-                .zip(&regions)
-                .find(|(block, _)| block.text() == expected_class.block_text)
-                .map(|(_, region)| region.class);
+                .find(|block| block.text() == expected_class.block_text)
+                .and_then(|block| {
+                    regions.iter().find(|r| r.bbox == block.bbox).or_else(|| {
+                        regions.iter().find(|r| {
+                            matches!(r.class, RegionClass::Table | RegionClass::Picture)
+                                && r.bbox.contains_center(&block.bbox)
+                        })
+                    })
+                })
+                .map(|region| region.class);
 
             match actual {
                 None => mismatches.push(format!(
@@ -742,10 +839,24 @@ fn page_file_from_page(page: &Page) -> PageFile {
         })
         .collect();
 
+    let graphics = page
+        .graphics
+        .iter()
+        .map(|g| GraphicFile {
+            kind: graphic_kind_slug(g.kind).to_string(),
+            bbox: [g.bbox.left, g.bbox.bottom, g.bbox.right, g.bbox.top],
+            z: Some(g.z),
+            stroke_width: g.stroke_width,
+            is_stroked: g.is_stroked,
+            is_filled: g.is_filled,
+        })
+        .collect();
+
     PageFile {
         width: page.width,
         height: page.height,
         blocks,
+        graphics,
     }
 }
 
@@ -790,10 +901,10 @@ pub struct SnapshotCase<'a> {
 /// use pdfspatial_core::{BBox, Block, Char, Line, Page, Word};
 ///
 /// let bbox = BBox { left: 40.0, bottom: 700.0, right: 200.0, top: 712.0 };
-/// let ch = Char { unicode: Some('x'), bbox, font_name: "Helvetica".into(), font_size: 12.0 };
+/// let ch = Char { unicode: Some('x'), bbox, font_name: "Helvetica".into(), font_size: 12.0, ..Default::default() };
 /// let word = Word { text: "x".into(), bbox, chars: vec![ch] };
 /// let line = Line { text: "x".into(), bbox, words: vec![word] };
-/// let page = Page { index: 0, width: 600.0, height: 800.0, blocks: vec![Block { bbox, lines: vec![line] }] };
+/// let page = Page { index: 0, width: 600.0, height: 800.0, blocks: vec![Block { bbox, lines: vec![line] }], ..Default::default() };
 ///
 /// let expected = ExpectedBehavior::default();
 /// let case = SnapshotCase {
@@ -1057,6 +1168,7 @@ mod tests {
                     bbox,
                     font_name: "Draft".to_string(),
                     font_size: 10.0,
+                    ..Default::default()
                 })
                 .collect();
             let word = Word {
@@ -1088,6 +1200,7 @@ mod tests {
                 block("Right two", [320.0, 640.0, 560.0, 690.0]),
                 block("Left two", [40.0, 640.0, 280.0, 690.0]),
             ],
+            ..Default::default()
         }
     }
 

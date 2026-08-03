@@ -2,7 +2,7 @@
   "id": "merged_table_cell-header-cell-spans-two-columns",
   "pitfall": "merged_table_cell",
   "root_cause": "classification",
-  "description": "A table whose header cell spans two columns (colspan). TEDS-Struct would penalize this topology mismatch most heavily once a table-structure predictor exists, but the more basic problem comes first: classify_regions never emits RegionClass::Table at all, merged cells or not, so this block defaults to RegionClass::Text.",
+  "description": "A table whose header cell spans two columns (colspan), with a synthetic `graphics` border (4 ruling lines) around it standing in for the PDF's real table rules. graphics::detect_table_regions (Stage 1b) now detects this as a Table from its ruling lines without any vision model. TEDS-Struct's topology-mismatch penalty for the merged cell itself is future work once a table-structure predictor exists to score against.",
   "page": {
     "width": 600.0,
     "height": 800.0,
@@ -14,6 +14,12 @@
           { "text": "Expenses     90000", "bbox": [40.0, 470.0, 400.0, 485.0], "font_size": 10.0 }
         ]
       }
+    ],
+    "graphics": [
+      { "kind": "stroke", "bbox": [40.0, 515.0, 400.0, 515.0] },
+      { "kind": "stroke", "bbox": [40.0, 470.0, 400.0, 470.0] },
+      { "kind": "stroke", "bbox": [40.0, 470.0, 40.0, 515.0] },
+      { "kind": "stroke", "bbox": [400.0, 470.0, 400.0, 515.0] }
     ]
   },
   "expected": {

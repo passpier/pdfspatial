@@ -55,6 +55,9 @@ Every case must live directly under the directory matching its own `pitfall` fie
           { "text": "...", "bbox": [40.0, 700.0, 290.0, 750.0], "font_size": 10.0, "font_name": "Helvetica-Bold" }
         ]
       }
+    ],
+    "graphics": [
+      { "kind": "stroke", "bbox": [40.0, 515.0, 400.0, 515.0] }
     ]
   },
   "expected": {
@@ -69,10 +72,24 @@ Every case must live directly under the directory matching its own `pitfall` fie
 - `bbox` is `[left, bottom, right, top]`, already in the crate's own bottom-left-origin
   coordinate space (no COCO-style flip needed -- these are hand-authored directly).
 - `font_name` (optional, defaults to a placeholder): the PDF font's own name, e.g.
-  `"Helvetica-Bold"`. It's the only weight signal this crate's extraction layer exposes
-  (`Char::font_name`) -- no numeric weight is available -- so `section_header_vs_bold`
-  cases that need a bold-at-body-size heading (no font-size cue) set it on their heading
-  lines only, leaving body lines at the default.
+  `"Helvetica-Bold"`. `Char::font_name` remains the only weight signal a hand-authored
+  case can set through this field, so `section_header_vs_bold` cases that need a
+  bold-at-body-size heading (no font-size cue) set it on their heading lines only,
+  leaving body lines at the default. (`Char::font_weight`, a numeric weight, exists on
+  the runtime data model as of Stage 1b -- real PDFium extraction populates it -- but
+  isn't yet exposed through this hand-authored schema, since no seeded case currently
+  needs to control it directly.)
+- `graphics` (optional, defaults to empty): a page's non-text objects, mirroring
+  `crate::Graphic` -- see [`docs/pitfall_registry.json`](../docs/pitfall_registry.json)'s
+  `merged_table_cell`/`figure_caption`/`borderless_table` entries for what this
+  unblocks. Each entry is `{ "kind", "bbox", "z"?, "stroke_width"?, "is_stroked"?,
+  "is_filled"? }`; `kind` is one of `stroke`/`fill`/`image`/`shading`; `z` defaults to
+  the entry's position in the array (paint order); `stroke_width` defaults to `1.0`,
+  `is_stroked` defaults to `true`, `is_filled` defaults to `false` -- sensible defaults
+  for the common case (a ruling line), so a table border case only needs `kind`/`bbox`
+  per line. A bordered table needs at least 2 distinct horizontal and 2 distinct
+  vertical `stroke` lines (`graphics::detect_table_regions`'s `MIN_GRID_LINES`); a
+  picture needs one `image` graphic over the figure's bbox.
 - A block is authored as one or more `lines` (each its own line/word/char run) so a
   case can control line count directly -- several pitfalls (running headers/footers,
   multi-line table cells, fragmented formulas) hinge on `Block::lines().len()`, which a

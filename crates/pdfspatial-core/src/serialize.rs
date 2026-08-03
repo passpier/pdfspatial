@@ -8,11 +8,13 @@
 //!
 //! [`to_markdown_structured`] renders the Stage 2/4a structural Markdown instead: `#`/`##`
 //! headings from [`crate::layout::classify_regions`]'s `Title`/`SectionHeader` output,
-//! `-` list items, and italicized captions, over blocks already reordered by
+//! `-` list items, italicized captions, footnotes, GFM pipe tables, and image
+//! placeholders, over blocks already reordered by
 //! [`crate::assemble::assemble_reading_order`].
 
-use crate::Document;
 use crate::layout::{Region, RegionClass};
+use crate::{Block, Document, Page};
+use crate::{graphics, metrics};
 
 /// Renders `document` to Markdown at Stage 1 fidelity: one paragraph per geometric
 /// block, blocks separated by a blank line, and pages separated by a Markdown thematic
@@ -27,7 +29,7 @@ use crate::layout::{Region, RegionClass};
 /// let word = Word { text: "Hello".into(), bbox: BBox::ZERO, chars: vec![] };
 /// let line = Line { text: "Hello".into(), bbox: BBox::ZERO, words: vec![word] };
 /// let block = Block { bbox: BBox::ZERO, lines: vec![line] };
-/// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block] };
+/// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block], ..Default::default() };
 /// let doc = Document { pages: vec![page] };
 ///
 /// assert_eq!(to_markdown(&doc), "Hello");
@@ -54,15 +56,22 @@ pub fn to_markdown(document: &Document) -> String {
 /// - [`RegionClass::SectionHeader`] → `## ` heading
 /// - [`RegionClass::ListItem`] → `- ` list item
 /// - [`RegionClass::Caption`] → italicized (`*...*`) paragraph
+/// - [`RegionClass::Footnote`] → a `[^n]:`-style Markdown footnote definition
 /// - [`RegionClass::PageHeader`] / [`RegionClass::PageFooter`] → omitted entirely
+/// - [`RegionClass::Table`] → a GFM pipe table, reconstructed by
+///   [`crate::graphics::table_grid_cells`] from the region's ruling lines and every
+///   block it contains -- rendered once per table, not once per member block
+/// - [`RegionClass::Picture`] → a Markdown image placeholder (`![]()`, no `src`: Stage
+///   1b extracts an image's bbox, not its raster bytes)
 /// - everything else (including [`RegionClass::Text`] and any class the heuristic
 ///   classifier never produces) → a plain paragraph, same as [`to_markdown`]
 ///
-/// Each block is matched to its region by exact bounding-box equality — the contract
-/// [`crate::layout::classify_regions`] documents for its output. A block with no
-/// matching region (e.g. `regions` came from a different document) falls back to a
-/// plain paragraph. Pages are separated by a Markdown thematic break (`---`), as in
-/// [`to_markdown`].
+/// A block is matched to its region by highest-overlap IoU (via [`crate::metrics::iou`])
+/// rather than exact bounding-box equality, so a block whose bbox was minutely
+/// recomputed upstream (e.g. [`crate::assemble::stitch_cross_page_continuations`]) still
+/// finds its region instead of silently degrading to a plain paragraph; a block with no
+/// region overlapping it by more than [`MATCH_IOU_THRESHOLD`] falls back to one. Pages
+/// are separated by a Markdown thematic break (`---`), as in [`to_markdown`].
 ///
 /// # Examples
 ///
@@ -75,7 +84,7 @@ pub fn to_markdown(document: &Document) -> String {
 /// let word = Word { text: "Title".into(), bbox, chars: vec![] };
 /// let line = Line { text: "Title".into(), bbox, words: vec![word] };
 /// let block = Block { bbox, lines: vec![line] };
-/// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block] };
+/// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block], ..Default::default() };
 /// let doc = Document { pages: vec![page] };
 ///
 /// let regions = vec![Region { class: RegionClass::Title, bbox, confidence: 1.0 }];
@@ -85,24 +94,127 @@ pub fn to_markdown_structured(document: &Document, regions: &[Region]) -> String
     document
         .pages
         .iter()
-        .map(|page| {
-            page.blocks
-                .iter()
-                .filter_map(|block| render_block(block, regions))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
+        .map(|page| render_page(page, regions))
         .collect::<Vec<_>>()
         .join("\n\n---\n\n")
 }
 
-/// Renders a single block per its matched region's class, or `None` if the region is a
-/// running header/footer that should be dropped from the Markdown output.
-fn render_block(block: &crate::Block, regions: &[Region]) -> Option<String> {
+/// The minimum IoU between a block and a region for them to be considered "the same
+/// block" when matching (see [`to_markdown_structured`]'s docs). Well above what any two
+/// distinct, non-overlapping blocks could reach, but tolerant of the sub-point float
+/// drift a bbox can pick up from being recomputed (e.g. unioned during stitching).
+const MATCH_IOU_THRESHOLD: f32 = 0.9;
+
+/// Renders one page: blocks claimed by a detected table are folded into a single GFM
+/// table at that table's position (top-y of its bbox); a picture region with no
+/// containing/overlapping block is inserted as its own item at its own position;
+/// everything else renders block-by-block via [`render_block`].
+fn render_page(page: &Page, regions: &[Region]) -> String {
+    enum Item<'a> {
+        Block(&'a Block),
+        Table(&'a Region),
+        Picture,
+    }
+
+    let table_regions: Vec<&Region> = regions
+        .iter()
+        .filter(|r| r.class == RegionClass::Table)
+        .collect();
+    let picture_regions: Vec<&Region> = regions
+        .iter()
+        .filter(|r| r.class == RegionClass::Picture)
+        .collect();
+
+    let mut items: Vec<(f32, Item)> = Vec::new();
+    let mut rendered_tables: Vec<&Region> = Vec::new();
+
+    'blocks: for block in &page.blocks {
+        for table in &table_regions {
+            if table.bbox.contains_center(&block.bbox) {
+                if !rendered_tables.iter().any(|r| std::ptr::eq(*r, *table)) {
+                    items.push((table.bbox.top, Item::Table(table)));
+                    rendered_tables.push(table);
+                }
+                continue 'blocks;
+            }
+        }
+        if picture_regions
+            .iter()
+            .any(|p| p.bbox.contains_center(&block.bbox))
+        {
+            // A block sitting inside a picture's own bbox (rare -- most pictures have
+            // no overlapping text block at all) is dropped rather than duplicated: the
+            // picture placeholder below already represents that region of the page.
+            continue;
+        }
+        items.push((block.bbox.top, Item::Block(block)));
+    }
+
+    for picture in &picture_regions {
+        items.push((picture.bbox.top, Item::Picture));
+    }
+
+    items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    items
+        .into_iter()
+        .filter_map(|(_, item)| match item {
+            Item::Block(block) => render_block(block, regions),
+            Item::Table(table) => {
+                graphics::table_grid_cells(table.bbox, &page.graphics, &page.blocks)
+                    .map(|grid| render_gfm_table(&grid))
+            }
+            Item::Picture => Some("![]()".to_string()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Renders a `rows`-by-columns grid (as produced by [`graphics::table_grid_cells`]) as a
+/// GFM pipe table. The first row is treated as the header row -- table ruling-line
+/// detection has no way to distinguish a header row from a body row by geometry alone,
+/// so this mirrors the common case (a table's first row is its header) rather than
+/// guessing per-table.
+fn render_gfm_table(rows: &[Vec<String>]) -> String {
+    let Some(header) = rows.first() else {
+        return String::new();
+    };
+    let escape = |cell: &str| cell.replace('|', "\\|").replace('\n', "<br>");
+    let render_row = |row: &[String]| {
+        format!(
+            "| {} |",
+            row.iter()
+                .map(|c| escape(c))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )
+    };
+
+    let mut lines = vec![render_row(header)];
+    lines.push(format!(
+        "| {} |",
+        std::iter::repeat_n("---", header.len())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    ));
+    lines.extend(rows.iter().skip(1).map(|row| render_row(row)));
+    lines.join("\n")
+}
+
+/// Renders a single block per its matched region's class (matched by IoU, see
+/// [`to_markdown_structured`]), or `None` if the region is a running header/footer that
+/// should be dropped from the Markdown output. [`RegionClass::Table`]/
+/// [`RegionClass::Picture`] blocks are handled by [`render_page`] before this is called
+/// and never reach the fallback arm here as anything but a plain paragraph if somehow
+/// unmatched.
+fn render_block(block: &Block, regions: &[Region]) -> Option<String> {
     let class = regions
         .iter()
-        .find(|r| r.bbox == block.bbox)
-        .map(|r| r.class);
+        .filter(|r| r.class != RegionClass::Table && r.class != RegionClass::Picture)
+        .map(|r| (r, metrics::iou(r.bbox, block.bbox)))
+        .filter(|(_, iou)| *iou >= MATCH_IOU_THRESHOLD)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(r, _)| r.class);
     let text = block.text();
 
     match class {
@@ -116,8 +228,22 @@ fn render_block(block: &crate::Block, regions: &[Region]) -> Option<String> {
                 .join("\n"),
         ),
         Some(RegionClass::Caption) => Some(format!("*{text}*")),
+        Some(RegionClass::Footnote) => {
+            let marker = footnote_marker(&text).unwrap_or(text.as_str());
+            Some(format!("[^{marker}]: {text}"))
+        }
         _ => Some(text),
     }
+}
+
+/// Extracts a footnote block's leading marker (the digit/symbol
+/// [`crate::layout::classify_block`]'s footnote rule already required it to open with)
+/// for use as the footnote's Markdown reference id, e.g. `"1"` from `"1 See appendix
+/// A."`. Falls back to `None` (the caller then uses the full text as the id) if the text
+/// doesn't start with a short marker token.
+fn footnote_marker(text: &str) -> Option<&str> {
+    let marker = text.split_whitespace().next()?;
+    (marker.len() <= 3).then_some(marker)
 }
 
 /// Strips a leading bullet/ordered-list marker (already detected by
@@ -173,6 +299,7 @@ mod tests {
                 width: 612.0,
                 height: 792.0,
                 blocks: vec![block("- first point", bbox)],
+                ..Default::default()
             }],
         };
         let regions = vec![Region {
@@ -197,6 +324,7 @@ mod tests {
                     block("Running Header", header_bbox),
                     block("Body text", body_bbox),
                 ],
+                ..Default::default()
             }],
         };
         let regions = vec![
@@ -213,5 +341,189 @@ mod tests {
         ];
 
         assert_eq!(to_markdown_structured(&doc, &regions), "Body text");
+    }
+
+    fn h_line(y: f32, left: f32, right: f32) -> crate::Graphic {
+        crate::Graphic {
+            kind: crate::GraphicKind::Stroke,
+            bbox: BBox {
+                left,
+                bottom: y,
+                right,
+                top: y,
+            },
+            z: 0,
+            stroke_width: 1.0,
+            is_stroked: true,
+            is_filled: false,
+        }
+    }
+
+    fn v_line(x: f32, bottom: f32, top: f32) -> crate::Graphic {
+        crate::Graphic {
+            kind: crate::GraphicKind::Stroke,
+            bbox: BBox {
+                left: x,
+                bottom,
+                right: x,
+                top,
+            },
+            z: 0,
+            stroke_width: 1.0,
+            is_stroked: true,
+            is_filled: false,
+        }
+    }
+
+    #[test]
+    fn table_region_renders_as_one_gfm_table_not_one_paragraph_per_cell() {
+        let table_bbox = BBox {
+            left: 40.0,
+            bottom: 60.0,
+            right: 200.0,
+            top: 100.0,
+        };
+        let graphics = vec![
+            h_line(100.0, 40.0, 200.0),
+            h_line(80.0, 40.0, 200.0),
+            h_line(60.0, 40.0, 200.0),
+            v_line(40.0, 60.0, 100.0),
+            v_line(120.0, 60.0, 100.0),
+            v_line(200.0, 60.0, 100.0),
+        ];
+        let cells = [
+            (
+                "Name",
+                BBox {
+                    left: 45.0,
+                    bottom: 85.0,
+                    right: 115.0,
+                    top: 95.0,
+                },
+            ),
+            (
+                "Age",
+                BBox {
+                    left: 125.0,
+                    bottom: 85.0,
+                    right: 195.0,
+                    top: 95.0,
+                },
+            ),
+            (
+                "Ada",
+                BBox {
+                    left: 45.0,
+                    bottom: 65.0,
+                    right: 115.0,
+                    top: 75.0,
+                },
+            ),
+            (
+                "36",
+                BBox {
+                    left: 125.0,
+                    bottom: 65.0,
+                    right: 195.0,
+                    top: 75.0,
+                },
+            ),
+        ];
+        let doc = Document {
+            pages: vec![crate::Page {
+                index: 0,
+                width: 612.0,
+                height: 792.0,
+                blocks: cells.iter().map(|(t, b)| block(t, *b)).collect(),
+                graphics,
+            }],
+        };
+        let regions = vec![Region {
+            class: RegionClass::Table,
+            bbox: table_bbox,
+            confidence: 0.75,
+        }];
+
+        let out = to_markdown_structured(&doc, &regions);
+        assert_eq!(out, "| Name | Age |\n| --- | --- |\n| Ada | 36 |");
+    }
+
+    #[test]
+    fn picture_region_renders_as_image_placeholder() {
+        let picture_bbox = BBox {
+            left: 40.0,
+            bottom: 40.0,
+            right: 200.0,
+            top: 200.0,
+        };
+        let doc = Document {
+            pages: vec![crate::Page {
+                index: 0,
+                width: 612.0,
+                height: 792.0,
+                ..Default::default()
+            }],
+        };
+        let regions = vec![Region {
+            class: RegionClass::Picture,
+            bbox: picture_bbox,
+            confidence: 0.7,
+        }];
+
+        assert_eq!(to_markdown_structured(&doc, &regions), "![]()");
+    }
+
+    #[test]
+    fn footnote_renders_with_marker_reference() {
+        let footnote_bbox = bbox(50.0);
+        let doc = Document {
+            pages: vec![crate::Page {
+                index: 0,
+                width: 612.0,
+                height: 792.0,
+                blocks: vec![block("1 See appendix A.", footnote_bbox)],
+                ..Default::default()
+            }],
+        };
+        let regions = vec![Region {
+            class: RegionClass::Footnote,
+            bbox: footnote_bbox,
+            confidence: 0.55,
+        }];
+
+        assert_eq!(
+            to_markdown_structured(&doc, &regions),
+            "[^1]: 1 See appendix A."
+        );
+    }
+
+    #[test]
+    fn block_matches_region_despite_minor_bbox_drift() {
+        // A bbox that's off by a fraction of a point (e.g. from upstream float
+        // recomputation) should still match its region via IoU tolerance, not fall
+        // through to a plain paragraph.
+        let region_bbox = bbox(100.0);
+        let drifted_bbox = BBox {
+            left: region_bbox.left,
+            bottom: region_bbox.bottom + 0.001,
+            right: region_bbox.right,
+            top: region_bbox.top,
+        };
+        let doc = Document {
+            pages: vec![crate::Page {
+                index: 0,
+                width: 612.0,
+                height: 792.0,
+                blocks: vec![block("Heading", drifted_bbox)],
+                ..Default::default()
+            }],
+        };
+        let regions = vec![Region {
+            class: RegionClass::Title,
+            bbox: region_bbox,
+            confidence: 1.0,
+        }];
+
+        assert_eq!(to_markdown_structured(&doc, &regions), "# Heading");
     }
 }

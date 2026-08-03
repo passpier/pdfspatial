@@ -2,7 +2,7 @@
   "id": "merged_table_cell-rowspan-cell-repeated-label",
   "pitfall": "merged_table_cell",
   "root_cause": "classification",
-  "description": "A table whose first column uses a rowspan (the 'West' region label applies to both rows below it, so the second row's first cell is blank). Same root cause as the colspan case: RegionClass::Table is unreachable without a vision-model detector.",
+  "description": "A table whose first column uses a rowspan (the 'West' region label applies to both rows below it, so the second row's first cell is blank), with a synthetic `graphics` border standing in for the PDF's real table rules. Same fix as the colspan case: graphics::detect_table_regions (Stage 1b) detects this as a Table from its ruling lines, no vision model needed.",
   "page": {
     "width": 600.0,
     "height": 800.0,
@@ -14,6 +14,12 @@
           { "text": "            B          200", "bbox": [40.0, 470.0, 400.0, 485.0], "font_size": 10.0 }
         ]
       }
+    ],
+    "graphics": [
+      { "kind": "stroke", "bbox": [40.0, 515.0, 400.0, 515.0] },
+      { "kind": "stroke", "bbox": [40.0, 470.0, 400.0, 470.0] },
+      { "kind": "stroke", "bbox": [40.0, 470.0, 40.0, 515.0] },
+      { "kind": "stroke", "bbox": [400.0, 470.0, 400.0, 515.0] }
     ]
   },
   "expected": {

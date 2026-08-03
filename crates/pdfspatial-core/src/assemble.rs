@@ -214,7 +214,7 @@ const OVERLAY_AREA_OVERLAP_FRACTION: f32 = 0.5;
 /// use pdfspatial_core::{BBox, Block, Char, Document, Line, Page, Word};
 ///
 /// fn line(text: &str, bbox: BBox, font_size: f32) -> Line {
-///     let chars = vec![Char { unicode: Some('x'), bbox, font_name: "Test".into(), font_size }];
+///     let chars = vec![Char { unicode: Some('x'), bbox, font_name: "Test".into(), font_size, ..Default::default() }];
 ///     let word = Word { text: text.into(), bbox, chars };
 ///     Line { text: text.into(), bbox, words: vec![word] }
 /// }
@@ -228,6 +228,7 @@ const OVERLAY_AREA_OVERLAP_FRACTION: f32 = 0.5;
 ///         bbox: tail_bbox,
 ///         lines: vec![line("This sentence continues on the next", tail_bbox, 12.0)],
 ///     }],
+///     ..Default::default()
 /// };
 ///
 /// let head_bbox = BBox { left: 72.0, bottom: 697.5, right: 307.5, top: 710.9 };
@@ -239,6 +240,7 @@ const OVERLAY_AREA_OVERLAP_FRACTION: f32 = 0.5;
 ///         bbox: head_bbox,
 ///         lines: vec![line("page without a heading to signal a restart.", head_bbox, 12.0)],
 ///     }],
+///     ..Default::default()
 /// };
 ///
 /// let document = Document { pages: vec![page0, page1] };
@@ -267,6 +269,7 @@ pub fn assemble_reading_order(document: &Document) -> Document {
                 width: page.width,
                 height: page.height,
                 blocks,
+                ..Default::default()
             }
         })
         .collect();
@@ -806,6 +809,7 @@ mod tests {
             bbox,
             font_name: "Test".into(),
             font_size,
+            ..Default::default()
         };
         let word = Word {
             text: "line".into(),
@@ -862,6 +866,7 @@ mod tests {
                 right_bottom.clone(),
                 left_top.clone(),
             ],
+            ..Default::default()
         };
         let doc = Document { pages: vec![page] };
 
@@ -900,6 +905,7 @@ mod tests {
             width: 600.0,
             height: 800.0,
             blocks: vec![second.clone(), third.clone(), first.clone()],
+            ..Default::default()
         };
         let doc = Document { pages: vec![page] };
 
@@ -941,6 +947,7 @@ mod tests {
             // Right column's top edge sits higher, so the naive top-y leaf sort would
             // read it first -- only a qualifying vertical cut reads left-before-right.
             blocks: vec![right.clone(), left.clone()],
+            ..Default::default()
         };
         let doc = Document { pages: vec![page] };
 
@@ -979,6 +986,7 @@ mod tests {
             width: 600.0,
             height: 800.0,
             blocks: vec![left.clone(), right.clone()],
+            ..Default::default()
         };
         let doc = Document { pages: vec![page] };
 
@@ -1014,6 +1022,7 @@ mod tests {
             width: 600.0,
             height: 800.0,
             blocks: vec![left.clone(), right.clone()],
+            ..Default::default()
         };
         let doc = Document { pages: vec![page] };
 
@@ -1053,6 +1062,7 @@ mod tests {
             width: 600.0,
             height: 800.0,
             blocks: vec![bottom_right.clone(), top_left.clone()],
+            ..Default::default()
         };
         let doc = Document { pages: vec![page] };
 
@@ -1078,6 +1088,7 @@ mod tests {
                 bbox,
                 font_name: "Test".into(),
                 font_size,
+                ..Default::default()
             })
             .collect();
         let word = Word {
@@ -1101,6 +1112,7 @@ mod tests {
             width: 612.0,
             height: 792.0,
             blocks,
+            ..Default::default()
         }
     }
 

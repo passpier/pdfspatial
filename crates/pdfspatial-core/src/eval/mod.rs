@@ -223,6 +223,7 @@ pub struct PageReorderRank {
 ///         block("Right two", BBox { left: 320.0, bottom: 640.0, right: 560.0, top: 690.0 }),
 ///         block("Left two", BBox { left: 40.0, bottom: 640.0, right: 280.0, top: 690.0 }),
 ///     ],
+///     ..Default::default()
 /// };
 /// // A single-column page already in top-to-bottom order -- XY-cut leaves it alone.
 /// let single_column = Page {
@@ -233,6 +234,7 @@ pub struct PageReorderRank {
 ///         block("First", BBox { left: 40.0, bottom: 700.0, right: 560.0, top: 750.0 }),
 ///         block("Second", BBox { left: 40.0, bottom: 600.0, right: 560.0, top: 650.0 }),
 ///     ],
+///     ..Default::default()
 /// };
 ///
 /// let document = Document { pages: vec![multi_column, single_column] };
@@ -354,6 +356,7 @@ pub struct ReproMinimization {
 ///         block("Noise A", bbox(40.0, 500.0, 560.0, 550.0)),
 ///         block("Noise B", bbox(40.0, 400.0, 560.0, 450.0)),
 ///     ],
+///     ..Default::default()
 /// };
 ///
 /// let minimized = minimize_reorder_repro(&page).expect("page reorders");
@@ -390,6 +393,7 @@ pub fn minimize_reorder_repro(page: &Page) -> Option<ReproMinimization> {
         width: page.width,
         height: page.height,
         blocks: blocks.clone(),
+        ..Default::default()
     };
     let assembled = assemble_reading_order(&Document {
         pages: vec![scratch],
@@ -404,6 +408,7 @@ pub fn minimize_reorder_repro(page: &Page) -> Option<ReproMinimization> {
             width: page.width,
             height: page.height,
             blocks,
+            ..Default::default()
         },
         original_block_count,
         reorder_edit_distance: metrics::reading_order_edit_distance(&assembled_refs, &naive_refs),
@@ -431,6 +436,7 @@ fn reorders(blocks: &[Block], page_width: f32, page_height: f32) -> bool {
         width: page_width,
         height: page_height,
         blocks: blocks.to_vec(),
+        ..Default::default()
     };
     let assembled = assemble_reading_order(&Document {
         pages: vec![scratch],
@@ -559,6 +565,7 @@ mod tests {
                 text_block("Right two", bbox(320.0, 640.0, 560.0, 690.0)),
                 text_block("Left two", bbox(40.0, 640.0, 280.0, 690.0)),
             ],
+            ..Default::default()
         };
         // Already top-to-bottom, single column -- XY-cut leaves it untouched.
         let single_column = crate::Page {
@@ -569,6 +576,7 @@ mod tests {
                 text_block("First", bbox(40.0, 700.0, 560.0, 750.0)),
                 text_block("Second", bbox(40.0, 600.0, 560.0, 650.0)),
             ],
+            ..Default::default()
         };
 
         let document = crate::Document {
@@ -594,6 +602,7 @@ mod tests {
             width: 600.0,
             height: 800.0,
             blocks: vec![text_block("Only block", bbox(40.0, 700.0, 560.0, 750.0))],
+            ..Default::default()
         };
 
         let document = crate::Document {
@@ -623,6 +632,7 @@ mod tests {
                 text_block("Noise B", bbox(40.0, 400.0, 560.0, 450.0)),
                 text_block("Noise C", bbox(40.0, 300.0, 560.0, 350.0)),
             ],
+            ..Default::default()
         };
 
         let minimized = minimize_reorder_repro(&page).expect("page should reorder");
@@ -645,6 +655,7 @@ mod tests {
                 text_block("First", bbox(40.0, 700.0, 560.0, 750.0)),
                 text_block("Second", bbox(40.0, 600.0, 560.0, 650.0)),
             ],
+            ..Default::default()
         };
 
         assert_eq!(minimize_reorder_repro(&page), None);
@@ -662,6 +673,7 @@ mod tests {
                 text_block("Same", bbox(320.0, 700.0, 560.0, 750.0)),
                 text_block("Same", bbox(40.0, 700.0, 280.0, 750.0)),
             ],
+            ..Default::default()
         };
 
         assert_eq!(minimize_reorder_repro(&page), None);

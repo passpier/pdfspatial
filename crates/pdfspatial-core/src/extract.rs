@@ -43,7 +43,7 @@
 //! for I/O overlap and to keep the call shape ready for a future truly-parallel
 //! backend — but the actual PDFium calls it makes are serialized, not concurrent.
 
-use crate::{BBox, Block, Char, Document, Line, Page, PipelineError, Word};
+use crate::{BBox, Block, Char, Document, Graphic, GraphicKind, Line, Page, PipelineError, Word};
 use pdfium_render::prelude::*;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -308,13 +308,78 @@ fn extract_page(index: usize, page: &PdfPage) -> Result<Page, PipelineError> {
         .collect();
 
     let blocks = group_chars_into_blocks(&chars);
+    let graphics = extract_graphics(page);
 
     Ok(Page {
         index,
         width,
         height,
         blocks,
+        graphics,
     })
+}
+
+/// Extracts every non-text page object (vector paths, images, shadings) as a
+/// [`Graphic`], in PDFium's own object order.
+///
+/// This is Stage 1b: the graphics-layer counterpart to [`extract_char`]'s text-layer
+/// extraction. Text objects are skipped here -- they already flow through
+/// [`page.text()`]/[`extract_char`], and counting them again would double-count ink when
+/// [`crate::graphics`] unions bboxes to detect table grids. A `Path`/`Image`/`Shading`
+/// object whose bounds PDFium can't report (a rare, malformed-object case) is dropped
+/// rather than failing the whole page's extraction over one bad graphic.
+fn extract_graphics(page: &PdfPage) -> Vec<Graphic> {
+    page.objects()
+        .iter()
+        .enumerate()
+        .filter_map(|(z, object)| {
+            let kind = match object.object_type() {
+                PdfPageObjectType::Text | PdfPageObjectType::Unsupported => return None,
+                PdfPageObjectType::Image | PdfPageObjectType::XObjectForm => GraphicKind::Image,
+                PdfPageObjectType::Shading => GraphicKind::Shading,
+                PdfPageObjectType::Path => {
+                    // A stroked-and-unfilled path (the common case for ruling lines and
+                    // table borders) is `Stroke`; anything with a fill (even if also
+                    // stroked) is `Fill` -- `graphics::detect_table_regions` only cares
+                    // about the stroke case, and a filled rule/box still has a fill.
+                    let is_filled = object
+                        .as_path_object()
+                        .map(|p| p.fill_mode().map(|m| m != PdfPathFillMode::None))
+                        .transpose()
+                        .ok()
+                        .flatten()
+                        .unwrap_or(false);
+                    if is_filled {
+                        GraphicKind::Fill
+                    } else {
+                        GraphicKind::Stroke
+                    }
+                }
+            };
+
+            let rect = object.bounds().ok()?.to_rect();
+            let is_stroked = object
+                .as_path_object()
+                .and_then(|p| p.is_stroked().ok())
+                .unwrap_or(false);
+            let is_filled = matches!(kind, GraphicKind::Fill);
+            let stroke_width = object.stroke_width().map(|w| w.value).unwrap_or(0.0);
+
+            Some(Graphic {
+                kind,
+                bbox: BBox {
+                    left: rect.left().value,
+                    bottom: rect.bottom().value,
+                    right: rect.right().value,
+                    top: rect.top().value,
+                },
+                z,
+                stroke_width,
+                is_stroked,
+                is_filled,
+            })
+        })
+        .collect()
 }
 
 /// Runs Stage 1's char → word → line → block grouping over an already-extracted
@@ -337,6 +402,7 @@ fn extract_page(index: usize, page: &PdfPage) -> Result<Page, PipelineError> {
 ///     bbox: BBox { left, bottom: 0.0, right, top: 10.0 },
 ///     font_name: "Test".to_string(),
 ///     font_size: 10.0,
+///     ..Default::default()
 /// };
 ///
 /// // "Hi" as two characters on one baseline.
@@ -399,6 +465,7 @@ pub fn group_chars_into_blocks(chars: &[Char]) -> Vec<Block> {
 ///         bbox,
 ///         font_name: "Helvetica".to_string(),
 ///         font_size: 10.0,
+///         ..Default::default()
 ///     };
 ///     let word = Word { text: ch.to_string(), bbox, chars: vec![c] };
 ///     Line { text: ch.to_string(), bbox, words: vec![word] }
@@ -585,6 +652,25 @@ fn merge_rotated_runs_in_block(lines: &[Line]) -> Vec<Line> {
     result
 }
 
+/// Converts PDFium's [`PdfFontWeight`] (a mix of named CSS-style weight buckets and a
+/// `Custom` numeric fallback) to the plain numeric weight [`Char::font_weight`] carries,
+/// so downstream code (e.g. a `section_header_vs_bold` heuristic) can threshold on a
+/// single `u32` instead of matching every named variant.
+fn font_weight_to_u32(weight: PdfFontWeight) -> u32 {
+    match weight {
+        PdfFontWeight::Weight100 => 100,
+        PdfFontWeight::Weight200 => 200,
+        PdfFontWeight::Weight300 => 300,
+        PdfFontWeight::Weight400Normal => 400,
+        PdfFontWeight::Weight500 => 500,
+        PdfFontWeight::Weight600 => 600,
+        PdfFontWeight::Weight700Bold => 700,
+        PdfFontWeight::Weight800 => 800,
+        PdfFontWeight::Weight900 => 900,
+        PdfFontWeight::Custom(value) => value,
+    }
+}
+
 /// Converts a single PDFium character into our owned [`Char`] type.
 ///
 /// Returns `None` only when PDFium cannot produce *any* usable bounding box for the
@@ -596,6 +682,11 @@ fn extract_char(raw: &PdfPageTextChar) -> Option<Char> {
     // because word/line clustering cares about advance geometry, not ink shape.
     let rect = raw.loose_bounds().or_else(|_| raw.tight_bounds()).ok()?;
 
+    let fill_color = raw
+        .fill_color()
+        .map(|c| (c.red(), c.green(), c.blue(), c.alpha()))
+        .unwrap_or((0, 0, 0, 255));
+
     Some(Char {
         unicode: raw.unicode_char(),
         bbox: BBox {
@@ -606,6 +697,13 @@ fn extract_char(raw: &PdfPageTextChar) -> Option<Char> {
         },
         font_name: raw.font_name(),
         font_size: raw.unscaled_font_size().value,
+        font_weight: raw.font_weight().map(font_weight_to_u32),
+        // Defaults to upright (`0.0`) when PDFium can't report an angle rather than
+        // failing extraction over a cosmetic signal; `merge_rotated_text_runs` still
+        // falls back to inferring rotation from stacked glyph geometry for callers (like
+        // the Stage 3 synthetic corpus) with no real angle to read.
+        angle_degrees: raw.angle_degrees().unwrap_or(0.0),
+        fill_color,
     })
 }
 
@@ -889,6 +987,7 @@ mod tests {
             },
             font_name: "Test".to_string(),
             font_size,
+            ..Default::default()
         }
     }
 
