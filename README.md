@@ -35,7 +35,7 @@ model-shaped — see [Status](#status).
 <!-- BEGIN GENERATED: pitfall-status-row -->
 | Regression corpus of known failure modes (26 seeded cases) | ✅ Stable |
 <!-- END GENERATED: pitfall-status-row -->
-| Formula detection (`RegionClass::Formula`) | 📋 Planned — needs an ONNX runtime + model weights, out of scope for now; unlike tables/pictures, a formula has no ruling-line/XObject signal to key a heuristic off |
+| Formula detection (`RegionClass::Formula`) | 🚧 Partial — display (block-level) formulas classified via a geometric heuristic (`layout::is_display_formula`: centered, narrow, isolated, symbol-dense); *inline* formulas embedded mid-sentence still need an ONNX runtime + model weights, out of scope for now |
 
 See [`docs/PDF-to-Markdown Pipeline Roadmap.md`](docs/PDF-to-Markdown%20Pipeline%20Roadmap.md)
 for the full stage-by-stage plan, metrics, and exit criteria behind this table.

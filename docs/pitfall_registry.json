@@ -32,18 +32,16 @@
   "borderless_table": {
     "title": "Borderless / whitespace-delimited tables",
     "summary": "no ruling lines for the layout model to key off; frequently misclassified as plain `Text`",
-    "blocked": {
-      "reason": "graphics::detect_table_regions (Stage 1b) only detects tables from ruling lines (Page::graphics), which a borderless table has none of by definition -- there is nothing for it to key off here, same as before Stage 1b existed.",
-      "unblocked_by": "A text-alignment heuristic in layout.rs: column-consistent x-starts across several consecutive lines, independent of graphics.rs's ruling-line signal.",
-      "loop_refuses": false
-    }
+    "note": "Closed by layout::whitespace_column_corridors — a shared-whitespace-corridor heuristic over a single block's lines, complementing detect_borderless_table_regions's side-by-side-blocks shape."
   },
   "nested_formula": {
     "title": "Nested mathematical formulas",
     "summary": "inline formulas embedded mid-sentence not separated from surrounding text; multi-line/stacked formulas (fractions, summations, matrices) fragmented into multiple bounding boxes",
+    "note": "Display (block-level) formulas are now classified via layout::is_display_formula -- a geometric-plus-lexical heuristic requiring a block to be centered, narrow relative to the page, vertically isolated from its neighbours by roughly a line height, dense with math symbols/digits, and not end like a sentence. Both seeded cases (an isolated display formula and a two-line stacked fraction) now pass. *Inline* formulas embedded mid-sentence in a body paragraph are still open -- see blocked below.",
+    "status_override": "partial",
     "blocked": {
-      "reason": "Unlike Table/Picture, a formula has no reliable non-text page-object signal (no ruling lines, no XObject) to key a geometric heuristic off -- it's ordinary glyphs in an unusual spatial arrangement (stacked fraction bars, inline symbol clusters), which is genuinely a layout/vision-model problem, not an unused-PDFium-API problem.",
-      "unblocked_by": "Stage 4b vision detector -- the one region class in this registry that still needs it.",
+      "reason": "An inline formula shares its block with ordinary prose, so there is no separate bounding box or whitespace/isolation signal for a geometric heuristic to key off the way there is for a display formula -- distinguishing 'e=mc^2' embedded mid-sentence from surrounding text needs actual layout/vision understanding, not just geometry.",
+      "unblocked_by": "Stage 4b vision detector -- inline formula segmentation is the one sub-case in this registry that still needs it.",
       "loop_refuses": true
     }
   },
@@ -95,7 +93,7 @@
     "summary": "pdfium character extraction dropping or garbling glyphs from non-standard font encodings",
     "blocked": {
       "reason": "pdfium-render 0.9.3 (and PDFium's FPDF_TEXTPAGE API) expose no raw charcode, /Encoding, or /Differences accessor, so Stage 1 cannot re-resolve glyph-name-derived Unicode against the base encoding. Separately, the corpus case's `page` is a frozen extract_baseline snapshot, so an extract.rs fix cannot move the scoreboard until examples/stage3_pdf_cases.rs regenerates it. Note this is a narrower gap than it first appears: PDFium resolves ToUnicode internally for the common case, so this is specifically about non-standard/custom /Differences encodings PDFium's own resolution doesn't cover -- not a general 'PDFium can't read fonts' problem.",
-      "unblocked_by": "A charcode-level PDF reader independent of PDFium (xref + FlateDecode + content-stream tokenizing + AGL), or an upstream pdfium-render API exposing per-char charcodes; then regenerate the PDF-backed snapshot.",
+      "unblocked_by": "A charcode-level PDF reader independent of PDFium -- e.g. `lopdf` (xref + FlateDecode + content-stream tokenizing) paired with an Adobe Glyph List table, walking each page's /Font resource dict's /Encoding /Differences to re-resolve glyph names the way firecrawl/pdf-inspector does on the same lopdf substrate -- or an upstream pdfium-render API exposing per-char charcodes; then regenerate the PDF-backed snapshot.",
       "loop_refuses": true
     },
     "pdf_backed_reason": "Needs a real custom-encoded/CID-keyed font to reproduce dropped/garbled glyphs."

@@ -15,9 +15,13 @@
 //!   inside a detected table or picture is excluded from the text-layer pass so it
 //!   isn't double-classified.
 //!
-//! [`RegionClass::Formula`] still requires a genuine layout/vision model -- inline
-//! formula segmentation needs more than ruling lines or geometry can offer -- and is
-//! never produced here; see `docs/pitfall_registry.json`'s `nested_formula` entry.
+//! [`RegionClass::Formula`] is produced for **display** (block-level) formulas via
+//! [`is_display_formula`] -- a centered, narrow, vertically isolated block whose text is
+//! dense with math symbols/digits and doesn't read as a sentence. *Inline* formula
+//! segmentation (a formula embedded mid-sentence in a body paragraph) still requires a
+//! genuine layout/vision model -- there is no geometric signal to key off there, since
+//! the formula shares its block with ordinary prose -- and is never produced here; see
+//! `docs/pitfall_registry.json`'s `nested_formula` entry.
 //!
 //! [`RegionClass::PageHeader`]/[`RegionClass::PageFooter`] come from two independent
 //! signals, either of which is sufficient: a single-page geometric shape test (thin
@@ -36,7 +40,7 @@
 //! [`starts_with_footnote_marker`]). It is checked after the header/footer band rules,
 //! so a block already claimed as a running footer never also matches as a footnote.
 
-use crate::{BBox, Block, Document};
+use crate::{BBox, Block, Document, Line};
 
 /// DocLayNet's 11 region categories.
 ///
@@ -136,6 +140,41 @@ const BOLD_CHAR_FRACTION: f32 = 0.8;
 /// unrelated heuristics.
 const BORDERLESS_TABLE_ROW_MAX_HEIGHT_FRACTION: f32 = 0.15;
 
+/// A whitespace corridor (see [`whitespace_column_corridors`]) only counts as a column
+/// separator once it's at least this many multiples of the block's own font size wide.
+/// Ordinary inter-word spacing is well under one font size, so this cleanly separates a
+/// table gutter from a single wide space in running text; it also matches the same
+/// "gutter must dominate" spirit as [`detect_borderless_table_regions`]'s narrowest-gutter
+/// test, just expressed per-corridor instead of per-row.
+const BORDERLESS_TABLE_MIN_CORRIDOR_FACTOR: f32 = 1.5;
+
+/// [`whitespace_column_corridors`] never fires on a single line -- one line has no other
+/// line to corroborate a corridor against, so any "column" it appears to have could just
+/// be irregular inter-word spacing.
+const BORDERLESS_TABLE_MIN_LINES: usize = 2;
+
+/// A display formula's horizontal center must fall within this fraction of the page
+/// width from the true page center -- a display formula is centered on the page (or the
+/// text column), unlike a left-aligned body paragraph or heading.
+const FORMULA_CENTER_TOLERANCE_FRACTION: f32 = 0.08;
+
+/// A display formula's block must be no wider than this fraction of the page width.
+/// This is the load-bearing discriminator between a formula and an ordinary centered
+/// body paragraph above/below it (also centered, but running most of the page's text
+/// width) -- see [`is_display_formula`].
+const FORMULA_MAX_WIDTH_FRACTION: f32 = 0.6;
+
+/// A display formula must be separated from its vertical neighbours by at least this
+/// multiple of its own font size -- ordinary body text wraps line-to-line with far less
+/// clearance than a formula set apart from surrounding prose.
+const FORMULA_MIN_ISOLATION_FACTOR: f32 = 1.2;
+
+/// The fraction of a candidate formula block's non-whitespace characters that must fall
+/// in the math-symbol/digit set (see [`is_display_formula`]) for it to count as
+/// symbol-dense rather than ordinary prose that merely happens to be centered and
+/// narrow.
+const FORMULA_MIN_MATH_DENSITY: f32 = 0.15;
+
 /// Classifies every geometric [`crate::Block`] in `document` into a [`Region`], one
 /// region per block (in document order, page-major), using only heuristics over Stage
 /// 1's own geometry and text — no vision model. See the [module docs](self) for which
@@ -189,8 +228,7 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
             });
             let (class, confidence) = classify_block(
                 block,
-                &page.blocks,
-                page.height,
+                page,
                 body_font_size,
                 page_predominantly_bold,
                 repeated_band,
@@ -330,6 +368,161 @@ pub fn detect_borderless_table_regions(blocks: &[&Block], page_height: f32) -> V
         .collect()
 }
 
+/// Splits `line`'s text into non-whitespace tokens, each carrying its own x-extent in
+/// page space, left to right.
+///
+/// A line with two or more [`Word`](crate::Word)s already has real per-word geometry
+/// (see [`Line::words`](crate::Line::words)'s own doc comment: "left to right"), so each
+/// word's own bbox is used directly. A line with at most one word -- the shape
+/// [`crate::eval::corpus`]'s fixture loader produces (one whole-line `Word`), and what a
+/// monospaced or kerning-collapsed run from real extraction can look like too -- has no
+/// per-word geometry to key off, so this falls back to interpolating a uniform character
+/// grid across the line's own bbox and splitting on runs of whitespace. Uniform
+/// interpolation is exact for monospaced text; for proportional text it's an
+/// approximation, but the corridors [`whitespace_column_corridors`] looks for are wide
+/// enough (see [`BORDERLESS_TABLE_MIN_CORRIDOR_FACTOR`]) to survive the resulting jitter.
+pub(crate) fn whitespace_line_tokens(line: &Line) -> Vec<(f32, f32, String)> {
+    if line.words.len() >= 2 {
+        return line
+            .words
+            .iter()
+            .map(|w| (w.bbox.left, w.bbox.right, w.text.clone()))
+            .collect();
+    }
+
+    let (bbox, text) = match line.words.first() {
+        Some(word) => (word.bbox, word.text.as_str()),
+        None => (line.bbox, line.text.as_str()),
+    };
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() || bbox.width() <= 0.0 {
+        return Vec::new();
+    }
+    let n = chars.len() as f32;
+    let x_at = |i: usize| bbox.left + bbox.width() * (i as f32) / n;
+
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        tokens.push((x_at(start), x_at(i), chars[start..i].iter().collect()));
+    }
+    tokens
+}
+
+/// The x-intervals between `line`'s consecutive tokens (see [`whitespace_line_tokens`]),
+/// i.e. every whitespace gap wide enough to separate two tokens -- including ordinary
+/// single-space word gaps, which [`whitespace_column_corridors`]'s width filter is
+/// responsible for discarding, not this function.
+fn whitespace_line_gaps(line: &Line) -> Vec<(f32, f32)> {
+    let tokens = whitespace_line_tokens(line);
+    tokens
+        .windows(2)
+        .filter_map(|pair| {
+            let gap = (pair[0].1, pair[1].0);
+            (gap.1 > gap.0).then_some(gap)
+        })
+        .collect()
+}
+
+/// The pairwise intersection of every interval in `a` against every interval in `b`.
+fn intersect_intervals(a: &[(f32, f32)], b: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut out = Vec::new();
+    for &(a0, a1) in a {
+        for &(b0, b1) in b {
+            let lo = a0.max(b0);
+            let hi = a1.min(b1);
+            if lo < hi {
+                out.push((lo, hi));
+            }
+        }
+    }
+    out
+}
+
+/// Detects vertical whitespace corridors shared by every line of `block` -- the
+/// text-layer signal for a borderless table whose columns live *inside* one block's
+/// lines (as runs of aligned spaces), rather than as several side-by-side blocks (see
+/// [`detect_borderless_table_regions`] for that shape). See `docs/pitfall_registry.json`'s
+/// `borderless_table` entry.
+///
+/// Each line contributes the x-gaps between its own consecutive tokens (see
+/// [`whitespace_line_gaps`]); a corridor survives only if every line has a gap covering
+/// it, so a column that only some lines observe (e.g. a short trailing line, or a
+/// heading that doesn't share the body's columns) is not a corridor. This also means a
+/// corridor never floats past either edge of any line's own content, since a gap only
+/// exists between two real tokens -- ordinary ragged-right prose, where any given
+/// vertical slice usually lands inside some line's word rather than in every line's
+/// gap, essentially never survives the intersection.
+///
+/// Surviving corridors are then filtered to those at least
+/// [`BORDERLESS_TABLE_MIN_CORRIDOR_FACTOR`] times the block's own font size wide, to
+/// discard ordinary single-space word gaps that happen to align by coincidence across a
+/// couple of short lines.
+///
+/// Returns an empty `Vec` for a block with fewer than [`BORDERLESS_TABLE_MIN_LINES`]
+/// lines, or one with no shared corridor at all (the common case for ordinary body text).
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::layout::whitespace_column_corridors;
+/// use pdfspatial_core::{BBox, Block, Char, Line, Word};
+///
+/// fn char_at(bbox: BBox) -> Char {
+///     Char { unicode: None, bbox, font_size: 10.0, ..Default::default() }
+/// }
+///
+/// fn line(text: &str, bbox: BBox) -> Line {
+///     let chars = vec![char_at(bbox); text.len()];
+///     let word = Word { text: text.into(), bbox, chars };
+///     Line { text: text.into(), bbox, words: vec![word] }
+/// }
+///
+/// // Two lines whose columns line up in a wide shared corridor, no ruling lines at all.
+/// let bbox = BBox { left: 40.0, bottom: 500.0, right: 400.0, top: 515.0 };
+/// let header = line("Name        Score", bbox);
+/// let bbox2 = BBox { left: 40.0, bottom: 485.0, right: 400.0, top: 500.0 };
+/// let row = line("Alice          92", bbox2);
+///
+/// let block = Block { bbox: bbox.union(&bbox2), lines: vec![header, row] };
+/// assert!(!whitespace_column_corridors(&block).is_empty());
+/// ```
+pub fn whitespace_column_corridors(block: &Block) -> Vec<(f32, f32)> {
+    if block.lines.len() < BORDERLESS_TABLE_MIN_LINES {
+        return Vec::new();
+    }
+
+    let mut lines = block.lines.iter().map(whitespace_line_gaps);
+    let Some(first) = lines.next() else {
+        return Vec::new();
+    };
+    let mut corridors = first;
+    if corridors.is_empty() {
+        return Vec::new();
+    }
+    for gaps in lines {
+        if gaps.is_empty() {
+            return Vec::new();
+        }
+        corridors = intersect_intervals(&corridors, &gaps);
+        if corridors.is_empty() {
+            return Vec::new();
+        }
+    }
+
+    let min_width = block_font_size(block) * BORDERLESS_TABLE_MIN_CORRIDOR_FACTOR;
+    corridors.retain(|&(lo, hi)| hi - lo >= min_width);
+    corridors
+}
+
 /// Which page edge a block sits against, per [`HEADER_BAND_FRACTION`]/[`FOOTER_BAND_FRACTION`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Band {
@@ -339,23 +532,27 @@ enum Band {
     Footer,
 }
 
-/// Classifies a single block. `seen_title` is threaded through a page's blocks so at
-/// most one [`RegionClass::Title`] is emitted per page (the first oversized block near
-/// the top); later oversized blocks fall back to [`RegionClass::SectionHeader`].
-/// `repeated_band` is `Some` when this block's band and (normalized) text were found to
-/// recur across consecutive pages by [`repeated_running_bands`] -- the strongest signal,
-/// checked first. `page_predominantly_bold` gates the bold-heading signal (see
+/// Classifies a single block. `page` supplies the block's geometric context (its
+/// siblings, width, and height) -- `block` itself is expected to be one of `page.blocks`.
+/// `seen_title` is threaded through a page's blocks so at most one [`RegionClass::Title`]
+/// is emitted per page (the first oversized block near the top); later oversized blocks
+/// fall back to [`RegionClass::SectionHeader`]. `repeated_band` is `Some` when this
+/// block's band and (normalized) text were found to recur across consecutive pages by
+/// [`repeated_running_bands`] -- the strongest signal, checked first.
+/// `page_predominantly_bold` gates the bold-heading signal (see
 /// [`page_is_predominantly_bold`]): bold text only marks a heading when it stands out
 /// against the page's own body.
 fn classify_block(
     block: &Block,
-    page_blocks: &[Block],
-    page_height: f32,
+    page: &crate::Page,
     body_font_size: f32,
     page_predominantly_bold: bool,
     repeated_band: Option<Band>,
     seen_title: &mut bool,
 ) -> (RegionClass, f32) {
+    let page_blocks = &page.blocks;
+    let page_width = page.width;
+    let page_height = page.height;
     let line_count = block.lines.len();
     let font_size = block_font_size(block);
     let text = block.text();
@@ -426,6 +623,26 @@ fn classify_block(
         && !text.trim_end().ends_with(['.', '?', '!'])
     {
         return (RegionClass::SectionHeader, 0.55);
+    }
+
+    // A display (block-level) formula: centered, narrow, vertically isolated, and dense
+    // with math symbols/digits. Checked before the borderless-table fallback below,
+    // since a short two-line formula (e.g. a stacked fraction) can otherwise present the
+    // same aligned-whitespace shape `whitespace_column_corridors` looks for.
+    if is_display_formula(block, page_blocks, page_width, &text) {
+        return (RegionClass::Formula, 0.5);
+    }
+
+    // A borderless table whose columns live inside this block's own lines (aligned
+    // whitespace runs, no ruling lines and no separate side-by-side blocks for
+    // `detect_borderless_table_regions` to key off) -- see `whitespace_column_corridors`.
+    // Checked last, like every other fallback here, so it only ever reclassifies a block
+    // that would otherwise land in the `Text` default below.
+    if line_count >= BORDERLESS_TABLE_MIN_LINES
+        && band_of(block, page_height).is_none()
+        && !whitespace_column_corridors(block).is_empty()
+    {
+        return (RegionClass::Table, 0.5);
     }
 
     (RegionClass::Text, 0.5)
@@ -710,6 +927,115 @@ fn is_list_item(text: &str) -> bool {
 
 /// Returns `true` if `text` looks like a figure/table caption: starts with `Figure` or
 /// `Table` followed by a number (case-insensitive).
+/// Returns `true` if `block` has the geometric and textual signature of a **display**
+/// (block-level) mathematical formula -- see the [module docs](self) for why this can't
+/// cover *inline* formulas. Every one of the following must hold:
+///
+/// - **Centered**: the block's horizontal center falls within
+///   [`FORMULA_CENTER_TOLERANCE_FRACTION`] of the page width from true center.
+/// - **Narrow**: the block is no wider than [`FORMULA_MAX_WIDTH_FRACTION`] of the page --
+///   this, not centering, is what separates a formula from an ordinary centered body
+///   paragraph sitting right above/below it (a paragraph is also centered, but runs most
+///   of the page's text width).
+/// - **Vertically isolated**: at least [`FORMULA_MIN_ISOLATION_FACTOR`] font-sizes of
+///   clearance to the nearest neighbour above *and* below (via
+///   [`gap_to_nearest_block`]; a block with no neighbour on one side, e.g. the only block
+///   on its page, is trivially isolated on that side).
+/// - **Symbol-dense**: at least [`FORMULA_MIN_MATH_DENSITY`] of `text`'s non-whitespace
+///   characters fall in the math-symbol/digit set below.
+/// - **Not a sentence**: `text` doesn't end in `.`/`?`/`!`/`:` -- rules out an ordinary
+///   sentence that happens to be short, centered, and narrow (e.g. a centered pull quote
+///   or a lead-in line ending in a colon).
+///
+/// Deliberately *no* "low prose-word ratio" check: a hand-authored/ASCII-transcribed
+/// formula (e.g. `"integral from 0 to infinity of ... dx = sqrt(pi) / 2"`) spells math
+/// out in ordinary words, so its prose-word ratio is high even though it's genuinely a
+/// formula. Symbol/digit density is the signal that actually discriminates here.
+fn is_display_formula(block: &Block, page_blocks: &[Block], page_width: f32, text: &str) -> bool {
+    if page_width <= 0.0 {
+        return false;
+    }
+
+    let center_x = (block.bbox.left + block.bbox.right) / 2.0;
+    let is_centered =
+        (center_x - page_width / 2.0).abs() <= page_width * FORMULA_CENTER_TOLERANCE_FRACTION;
+    if !is_centered {
+        return false;
+    }
+
+    if block.bbox.width() > page_width * FORMULA_MAX_WIDTH_FRACTION {
+        return false;
+    }
+
+    let font_size = block_font_size(block);
+    if font_size > 0.0 {
+        let min_gap = font_size * FORMULA_MIN_ISOLATION_FACTOR;
+        let gap_below = vertical_gap_in_direction(block, page_blocks, /* below */ true);
+        let gap_above = vertical_gap_in_direction(block, page_blocks, /* below */ false);
+        if gap_below < min_gap || gap_above < min_gap {
+            return false;
+        }
+    }
+
+    let trimmed = text.trim_end();
+    if trimmed.ends_with(['.', '?', '!', ':']) {
+        return false;
+    }
+
+    let non_whitespace: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if non_whitespace.is_empty() {
+        return false;
+    }
+    let math_count = non_whitespace
+        .iter()
+        .filter(|c| is_math_symbol_or_digit(**c))
+        .count();
+    let density = math_count as f32 / non_whitespace.len() as f32;
+
+    density >= FORMULA_MIN_MATH_DENSITY
+}
+
+/// Returns the vertical gap between `block` and its nearest neighbour strictly in the
+/// given direction (`below = true` looks for blocks below `block`, `below = false` looks
+/// above), or `f32::INFINITY` if no block exists in that direction at all.
+///
+/// This differs from [`gap_to_nearest_block`] in exactly the case that matters for
+/// isolation checks: that helper takes a `min` over *every* other block's signed gap
+/// clamped to `0.0`, so a block with no neighbour on one side (e.g. the last block on a
+/// page) reports a false "touching" gap of `0.0` from a block that's actually on the
+/// *other* side, rather than "no neighbour here." Filtering to blocks genuinely on the
+/// requested side first avoids that false positive.
+fn vertical_gap_in_direction(block: &Block, page_blocks: &[Block], below: bool) -> f32 {
+    page_blocks
+        .iter()
+        .filter(|other| !std::ptr::eq(*other, block))
+        .filter_map(|other| {
+            if below {
+                (other.bbox.top <= block.bbox.bottom).then_some(block.bbox.bottom - other.bbox.top)
+            } else {
+                (other.bbox.bottom >= block.bbox.top).then_some(other.bbox.bottom - block.bbox.top)
+            }
+        })
+        .filter(|gap| gap.is_finite())
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// Returns `true` if `c` is a digit or a symbol commonly found in mathematical notation:
+/// ASCII operators/grouping (`= + - * / ^ ( ) [ ] { }`), the Greek block (formula
+/// variables like `π`, `θ`, `Σ`), and the Unicode math-operator block (`U+2200`-`U+22FF`,
+/// covering `∫ ∑ ∏ √` and friends). The seeded corpus cases are ASCII transcriptions
+/// (`"sqrt(pi)"`, not `"√π"`), so only the ASCII/digit checks are exercised today, but
+/// real extraction hands back actual Unicode math glyphs, so both ranges are checked.
+fn is_math_symbol_or_digit(c: char) -> bool {
+    c.is_ascii_digit()
+        || matches!(
+            c,
+            '=' | '+' | '-' | '*' | '/' | '^' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+        || ('\u{0370}'..='\u{03FF}').contains(&c)
+        || ('\u{2200}'..='\u{22FF}').contains(&c)
+}
+
 fn is_caption(text: &str) -> bool {
     let trimmed = text.trim_start();
     for prefix in ["Figure", "Table", "Fig."] {
@@ -1558,6 +1884,170 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_aligned_block_is_table() {
+        // Same shape as the borderless_table corpus fixtures: one block, several lines,
+        // each line's columns separated by a much wider gutter than a single word-space.
+        let b = block(vec![
+            line(
+                "Name        Score",
+                BBox {
+                    left: 40.0,
+                    bottom: 500.0,
+                    right: 400.0,
+                    top: 515.0,
+                },
+                10.0,
+            ),
+            line(
+                "Alice          92",
+                BBox {
+                    left: 40.0,
+                    bottom: 485.0,
+                    right: 400.0,
+                    top: 500.0,
+                },
+                10.0,
+            ),
+            line(
+                "Bob            77",
+                BBox {
+                    left: 40.0,
+                    bottom: 470.0,
+                    right: 400.0,
+                    top: 485.0,
+                },
+                10.0,
+            ),
+        ]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![b])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Table);
+    }
+
+    #[test]
+    fn ordinary_wrapped_prose_stays_text() {
+        // Ragged-right word-wrapped prose: no shared vertical corridor across all three
+        // lines, since each line's words fall at different x-positions.
+        let b = block(vec![
+            line(
+                "The quick brown fox jumps over the lazy dog and",
+                BBox {
+                    left: 40.0,
+                    bottom: 500.0,
+                    right: 400.0,
+                    top: 515.0,
+                },
+                10.0,
+            ),
+            line(
+                "then keeps running until it reaches the far end",
+                BBox {
+                    left: 40.0,
+                    bottom: 485.0,
+                    right: 400.0,
+                    top: 500.0,
+                },
+                10.0,
+            ),
+            line(
+                "of the field before stopping to rest completely.",
+                BBox {
+                    left: 40.0,
+                    bottom: 470.0,
+                    right: 400.0,
+                    top: 485.0,
+                },
+                10.0,
+            ),
+        ]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![b])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn single_whitespace_padded_line_stays_text() {
+        // Same column shape as whitespace_aligned_block_is_table's header line alone --
+        // but with no second line to corroborate a corridor against, BORDERLESS_TABLE_MIN_LINES
+        // should keep this Text.
+        let b = block(vec![line(
+            "Name        Score",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 400.0,
+                top: 515.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![b])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn header_band_aligned_lines_are_not_promoted_to_table() {
+        // Two whitespace-aligned lines sitting in the header band with only a small gap
+        // to the body below -- too close for the earlier PageHeader gap check to fire,
+        // so this reaches the new whitespace-corridor check. Left/right running
+        // header/footer pairs are exactly the shape
+        // `detect_borderless_table_regions`'s own doc comment calls out as a false
+        // positive to guard against via `band_of`; the whitespace-corridor path needs
+        // the same guard, or this would wrongly turn into a Table.
+        let b = block(vec![
+            line(
+                "Chapter 4                              Page 12",
+                BBox {
+                    left: 40.0,
+                    bottom: 760.0,
+                    right: 560.0,
+                    top: 775.0,
+                },
+                10.0,
+            ),
+            line(
+                "Results Section                        Draft",
+                BBox {
+                    left: 40.0,
+                    bottom: 744.0,
+                    right: 560.0,
+                    top: 759.0,
+                },
+                10.0,
+            ),
+        ]);
+        let body = block(vec![line(
+            "Body text starting immediately below the heading above.",
+            BBox {
+                left: 40.0,
+                bottom: 300.0,
+                right: 560.0,
+                top: 743.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![b, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
     fn image_graphic_is_classified_as_picture_region() {
         let mut p = page(vec![]);
         p.graphics = vec![crate::Graphic {
@@ -1579,5 +2069,156 @@ mod tests {
 
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].class, RegionClass::Picture);
+    }
+
+    #[test]
+    fn centered_isolated_symbol_dense_block_is_formula() {
+        // Centered, narrow (112pt of a 612pt page), the only block on its page (so
+        // trivially isolated), and dense with math operators/digits.
+        let formula = block(vec![line(
+            "x + y = z^2",
+            BBox {
+                left: 250.0,
+                bottom: 400.0,
+                right: 362.0,
+                top: 415.0,
+            },
+            12.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page(vec![formula])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Formula);
+    }
+
+    #[test]
+    fn centered_wide_paragraph_is_not_formula() {
+        // Centered like a formula would be, but 520pt wide on a 612pt page --
+        // `FORMULA_MAX_WIDTH_FRACTION` is what has to reject this, since centering
+        // alone doesn't discriminate a formula from a centered body paragraph.
+        let para = block(vec![line(
+            "This sentence is centered but far too wide to read as a formula",
+            BBox {
+                left: 46.0,
+                bottom: 400.0,
+                right: 566.0,
+                top: 415.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page(vec![para])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn centered_narrow_line_ending_in_colon_is_not_formula() {
+        // Centered and narrow enough to pass the geometric tests, but reads as a
+        // sentence (a lead-in line), not a formula.
+        let intro = block(vec![line(
+            "The result follows:",
+            BBox {
+                left: 200.0,
+                bottom: 400.0,
+                right: 412.0,
+                top: 415.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page(vec![intro])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn centered_large_font_block_stays_title_not_formula() {
+        // Also centered and narrow enough to pass the formula geometry tests, but the
+        // oversized-font title rule runs first in `classify_block` and must win the tie.
+        let title = block(vec![line(
+            "System Overview",
+            BBox {
+                left: 200.0,
+                bottom: 600.0,
+                right: 412.0,
+                top: 630.0,
+            },
+            24.0,
+        )]);
+        let body = block(vec![line(
+            "This is ordinary body text describing the system in more detail.",
+            BBox {
+                left: 46.0,
+                bottom: 400.0,
+                right: 566.0,
+                top: 415.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page(vec![title, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Title);
+    }
+
+    #[test]
+    fn whitespace_delimited_table_stays_table_not_formula() {
+        // Guards against the corridor collision the formula rule is deliberately
+        // ordered around: a genuine borderless table's aligned columns can otherwise
+        // look like the same shared-whitespace-corridor shape a short stacked formula
+        // has. This block is also off-center (left-anchored, not centered on the page),
+        // which independently keeps it out of `is_display_formula`.
+        let table = block(vec![
+            line(
+                "Name        Score",
+                BBox {
+                    left: 40.0,
+                    bottom: 500.0,
+                    right: 400.0,
+                    top: 515.0,
+                },
+                10.0,
+            ),
+            line(
+                "Alice          92",
+                BBox {
+                    left: 40.0,
+                    bottom: 485.0,
+                    right: 400.0,
+                    top: 500.0,
+                },
+                10.0,
+            ),
+            line(
+                "Bob            77",
+                BBox {
+                    left: 40.0,
+                    bottom: 470.0,
+                    right: 400.0,
+                    top: 485.0,
+                },
+                10.0,
+            ),
+        ]);
+
+        let doc = Document {
+            pages: vec![page(vec![table])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Table);
     }
 }

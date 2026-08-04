@@ -14,7 +14,7 @@
 
 use crate::layout::{Region, RegionClass};
 use crate::{Block, Document, Page};
-use crate::{graphics, metrics};
+use crate::{graphics, layout, metrics};
 
 /// Renders `document` to Markdown at Stage 1 fidelity: one paragraph per geometric
 /// block, blocks separated by a blank line, and pages separated by a Markdown thematic
@@ -171,12 +171,22 @@ fn render_page(page: &Page, regions: &[Region]) -> String {
         .join("\n\n")
 }
 
-/// Builds a table grid for a [`crate::layout::detect_borderless_table_regions`] region:
-/// unlike [`graphics::table_grid_cells`], there are no ruling lines to reconstruct a grid
-/// from, so this falls back to the region's own member blocks, ordered left to right as a
-/// single row. Returns `None` if no block's center falls inside `table_bbox` (should not
-/// happen for a region [`crate::layout::detect_borderless_table_regions`] itself produced,
-/// since it always encloses the blocks it was built from).
+/// Builds a table grid for a borderless-table region with no ruling lines to reconstruct
+/// a grid from. Two distinct shapes reach here (see `docs/pitfall_registry.json`'s
+/// `borderless_table` entry), told apart by how many blocks the region covers:
+///
+/// - Several blocks side by side ([`crate::layout::detect_borderless_table_regions`]):
+///   there's no per-line column signal to split on, so this falls back to the region's
+///   own member blocks, ordered left to right, as a single row.
+/// - One block whose own lines carry the columns as aligned whitespace runs
+///   ([`crate::layout::whitespace_column_corridors`]): each line becomes its own row,
+///   split at the block's shared corridors, with the first line's row doubling as the
+///   GFM header row (the same "first row is the header" convention
+///   [`render_gfm_table`] applies everywhere else).
+///
+/// Returns `None` if no block's center falls inside `table_bbox` (should not happen for
+/// a region either detector above itself produced, since both always enclose the blocks
+/// they were built from).
 ///
 /// Only called when [`graphics::table_grid_cells`] already returned `None`, so a
 /// ruling-line table always prefers its own reconstructed grid over this fallback.
@@ -188,6 +198,14 @@ fn borderless_table_row(table_bbox: crate::BBox, blocks: &[Block]) -> Option<Vec
     if cells.is_empty() {
         return None;
     }
+
+    if let [block] = cells.as_slice() {
+        let corridors = layout::whitespace_column_corridors(block);
+        if !corridors.is_empty() {
+            return Some(whitespace_table_rows(block, &corridors));
+        }
+    }
+
     cells.sort_by(|a, b| a.bbox.left.partial_cmp(&b.bbox.left).unwrap());
     Some(vec![
         cells
@@ -195,6 +213,35 @@ fn borderless_table_row(table_bbox: crate::BBox, blocks: &[Block]) -> Option<Vec
             .map(|b| b.text().replace('\n', "<br>"))
             .collect(),
     ])
+}
+
+/// Splits each of `block`'s lines into cells at `corridors` (as detected by
+/// [`crate::layout::whitespace_column_corridors`]), producing one row per line. A
+/// token (see [`crate::layout::whitespace_line_tokens`]) is assigned to the column
+/// after the last corridor that ends at or before its horizontal center -- so text
+/// falling between corridor *k* and corridor *k+1* lands in column *k+1*, giving
+/// `corridors.len() + 1` columns overall. Multiple tokens landing in the same column
+/// (e.g. two words on one side of every corridor) are joined with a single space.
+fn whitespace_table_rows(block: &Block, corridors: &[(f32, f32)]) -> Vec<Vec<String>> {
+    let mut corridors = corridors.to_vec();
+    corridors.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    block
+        .lines
+        .iter()
+        .map(|line| {
+            let mut row = vec![String::new(); corridors.len() + 1];
+            for (start, end, text) in layout::whitespace_line_tokens(line) {
+                let center = (start + end) / 2.0;
+                let column = corridors.iter().filter(|c| c.1 <= center).count();
+                if !row[column].is_empty() {
+                    row[column].push(' ');
+                }
+                row[column].push_str(&text);
+            }
+            row
+        })
+        .collect()
 }
 
 /// Renders a `rows`-by-columns grid (as produced by [`graphics::table_grid_cells`]) as a
@@ -368,6 +415,90 @@ mod tests {
         ];
 
         assert_eq!(to_markdown_structured(&doc, &regions), "Body text");
+    }
+
+    #[test]
+    fn whitespace_aligned_block_renders_as_gfm_table() {
+        // One block, no ruling lines -- the same shape
+        // `layout::whitespace_column_corridors` detects, and the fallback
+        // `borderless_table_row`/`whitespace_table_rows` must turn into a proper
+        // multi-row GFM table, not a single row with the whole block's text crammed in.
+        fn multiline(lines: &[(&str, BBox)]) -> crate::Block {
+            let block_lines: Vec<Line> = lines
+                .iter()
+                .map(|(text, bbox)| {
+                    let word = Word {
+                        text: (*text).into(),
+                        bbox: *bbox,
+                        chars: vec![],
+                    };
+                    Line {
+                        text: (*text).into(),
+                        bbox: *bbox,
+                        words: vec![word],
+                    }
+                })
+                .collect();
+            let bbox = block_lines
+                .iter()
+                .map(|l| l.bbox)
+                .reduce(|a, b| a.union(&b))
+                .unwrap();
+            crate::Block {
+                bbox,
+                lines: block_lines,
+            }
+        }
+
+        let lines = [
+            (
+                "Name        Score",
+                BBox {
+                    left: 40.0,
+                    bottom: 500.0,
+                    right: 400.0,
+                    top: 515.0,
+                },
+            ),
+            (
+                "Alice          92",
+                BBox {
+                    left: 40.0,
+                    bottom: 485.0,
+                    right: 400.0,
+                    top: 500.0,
+                },
+            ),
+            (
+                "Bob            77",
+                BBox {
+                    left: 40.0,
+                    bottom: 470.0,
+                    right: 400.0,
+                    top: 485.0,
+                },
+            ),
+        ];
+        let block = multiline(&lines);
+        let doc = Document {
+            pages: vec![crate::Page {
+                index: 0,
+                width: 612.0,
+                height: 792.0,
+                blocks: vec![block.clone()],
+                ..Default::default()
+            }],
+        };
+        let regions = vec![Region {
+            class: RegionClass::Table,
+            bbox: block.bbox,
+            confidence: 0.5,
+        }];
+
+        assert_eq!(
+            to_markdown_structured(&doc, &regions),
+            "| Name | Score |\n| --- | --- |\n| Alice | 92 |\n| Bob | 77 |"
+        );
     }
 
     fn h_line(y: f32, left: f32, right: f32) -> crate::Graphic {
