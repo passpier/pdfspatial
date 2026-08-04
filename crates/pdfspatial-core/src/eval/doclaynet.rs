@@ -362,6 +362,11 @@ pub fn load_sample(coco_json: &Path, cells_dir: &Path) -> Result<DocLayNetSample
                     class: class_for(annotation.category_id)?,
                     bbox: coco_bbox_to_bbox(annotation.bbox, image.height),
                     confidence: 1.0,
+                    // DocLayNet-core is one page (image) per sample, so this ground
+                    // truth has no multi-page notion to encode -- the same convention
+                    // `document_from_cells`/`document_from_cells_grouped` use elsewhere
+                    // in this module.
+                    page: 0,
                 })
             })
             .collect::<Result<Vec<_>, EvalError>>()?;

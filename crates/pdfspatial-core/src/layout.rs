@@ -84,6 +84,13 @@ pub struct Region {
     pub bbox: BBox,
     /// Model confidence in `[0.0, 1.0]`.
     pub confidence: f32,
+    /// Zero-based index of the [`crate::Page`] this region belongs to (matches
+    /// [`crate::Page::index`]). `bbox` alone is not enough to place a region on the
+    /// right page: two different pages' coordinate spaces both start near `(0, 0)`, so
+    /// without this field a region from one page can numerically collide with a block on
+    /// another page -- see [`crate::serialize::render_page`], which filters regions to
+    /// their own page before matching them against that page's blocks.
+    pub page: usize,
 }
 
 /// A block's font size is "large" relative to the page body when it exceeds the body
@@ -175,6 +182,162 @@ const FORMULA_MIN_ISOLATION_FACTOR: f32 = 1.2;
 /// narrow.
 const FORMULA_MIN_MATH_DENSITY: f32 = 0.15;
 
+/// A line-to-line font-size ratio at or above this counts as a style break for
+/// [`split_blocks_at_style_breaks`] -- the same magnitude [`classify_block`]'s
+/// size-based heading rule already uses, so a split only ever separates lines that
+/// [`classify_block`] would also treat as differently sized.
+const HEADING_SPLIT_FONT_FACTOR: f32 = SECTION_HEADER_FONT_FACTOR;
+
+/// Splits a `document`'s blocks at internal style breaks (a font-size jump of at least
+/// [`HEADING_SPLIT_FONT_FACTOR`], or a boldness flip, between two consecutive lines),
+/// returning a new [`Document`] -- the input is never mutated.
+///
+/// This exists because real Stage 1 block grouping ([`crate::extract::group_blocks`])
+/// merges lines purely on vertical-gap geometry, blind to a font-size or weight change
+/// between them. A heading line sitting flush against the paragraph it introduces (no
+/// extra vertical gap) ends up trapped as an interior line of one large `Text` block
+/// instead of its own block -- and [`classify_block`]'s heading rules only ever fire on
+/// a whole block, never a line within one, so that heading is never classified as a
+/// heading and never reaches `#`/`##` in the rendered Markdown.
+///
+/// Splitting here, as a Stage 2 pass over a *copy* of `document`, rather than in
+/// [`crate::extract::group_blocks`] itself, keeps Stage 1's own extraction output --
+/// and every PDF-backed regression-corpus snapshot frozen against it -- unchanged. Only
+/// [`crate::serialize::to_markdown_pipeline`] (and therefore the `pdfspatial` CLI) calls
+/// this; a caller driving [`classify_regions`]/[`crate::assemble::assemble_reading_order`]
+/// manually gets Stage 1's original, unsplit blocks unless it calls this first itself.
+///
+/// A split only ever separates lines *within* one block -- it never merges lines across
+/// two different Stage 1 blocks, so it can only recover structure Stage 1 already threw
+/// away by over-merging, never invent structure that wasn't there.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::layout::split_blocks_at_style_breaks;
+/// use pdfspatial_core::{BBox, Block, Document, Line, Page, Word};
+///
+/// fn line(text: &str, font_size: f32, bbox: BBox) -> Line {
+///     use pdfspatial_core::Char;
+///     let chars = text
+///         .chars()
+///         .map(|c| Char {
+///             unicode: Some(c),
+///             bbox,
+///             font_size,
+///             font_name: "Helvetica".into(),
+///             ..Default::default()
+///         })
+///         .collect();
+///     let word = Word { text: text.into(), bbox, chars };
+///     Line { text: text.into(), bbox, words: vec![word] }
+/// }
+///
+/// let heading = line(
+///     "A Heading",
+///     16.0,
+///     BBox { left: 0.0, bottom: 720.0, right: 200.0, top: 736.0 },
+/// );
+/// let body = line(
+///     "Body text that follows immediately, no gap.",
+///     10.0,
+///     BBox { left: 0.0, bottom: 700.0, right: 400.0, top: 716.0 },
+/// );
+/// let block = Block {
+///     bbox: BBox { left: 0.0, bottom: 700.0, right: 400.0, top: 736.0 },
+///     lines: vec![heading, body],
+/// };
+/// let doc = Document {
+///     pages: vec![Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block], ..Default::default() }],
+/// };
+///
+/// let split = split_blocks_at_style_breaks(&doc);
+/// assert_eq!(split.pages[0].blocks.len(), 2);
+/// assert_eq!(split.pages[0].blocks[0].text(), "A Heading");
+/// ```
+pub fn split_blocks_at_style_breaks(document: &Document) -> Document {
+    Document {
+        pages: document
+            .pages
+            .iter()
+            .map(|page| crate::Page {
+                blocks: page.blocks.iter().flat_map(split_block).collect(),
+                ..page.clone()
+            })
+            .collect(),
+    }
+}
+
+/// Splits one [`Block`] into one or more blocks at internal style breaks -- see
+/// [`split_blocks_at_style_breaks`]. Returns `vec![block.clone()]` unchanged when no
+/// break qualifies (the common case), so this is safe to call unconditionally over every
+/// block.
+fn split_block(block: &Block) -> Vec<Block> {
+    if block.lines.len() < 2 {
+        return vec![block.clone()];
+    }
+
+    let mut groups: Vec<Vec<Line>> = vec![vec![block.lines[0].clone()]];
+    for line in &block.lines[1..] {
+        let prev = groups
+            .last()
+            .and_then(|g| g.last())
+            .expect("group is never empty");
+        if is_style_break(prev, line) {
+            groups.push(vec![line.clone()]);
+        } else {
+            groups
+                .last_mut()
+                .expect("group is never empty")
+                .push(line.clone());
+        }
+    }
+
+    if groups.len() == 1 {
+        return vec![block.clone()];
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|lines| {
+            let bbox = lines.iter().map(|l| l.bbox).reduce(|a, b| a.union(&b))?;
+            Some(Block { bbox, lines })
+        })
+        .collect()
+}
+
+/// `true` if `prev` and `curr` (two consecutive lines within one Stage 1 block) differ
+/// enough in font size or boldness that they belong in different blocks -- see
+/// [`split_blocks_at_style_breaks`].
+fn is_style_break(prev: &Line, curr: &Line) -> bool {
+    let prev_size = line_font_size(prev);
+    let curr_size = line_font_size(curr);
+    if prev_size > 0.0 && curr_size > 0.0 {
+        let ratio = (curr_size / prev_size).max(prev_size / curr_size);
+        if ratio >= HEADING_SPLIT_FONT_FACTOR {
+            return true;
+        }
+    }
+    line_is_bold(prev) != line_is_bold(curr)
+}
+
+/// The character-weighted median font size of `line`'s own characters.
+fn line_font_size(line: &Line) -> f32 {
+    median_font_size(
+        line.words
+            .iter()
+            .flat_map(|w| &w.chars)
+            .map(|c| c.font_size)
+            .collect(),
+    )
+}
+
+/// `true` if at least [`BOLD_CHAR_FRACTION`] of `line`'s characters carry a bold font
+/// name.
+fn line_is_bold(line: &Line) -> bool {
+    bold_char_fraction(line.words.iter().flat_map(|w| &w.chars)) >= BOLD_CHAR_FRACTION
+}
+
 /// Classifies every geometric [`crate::Block`] in `document` into a [`Region`], one
 /// region per block (in document order, page-major), using only heuristics over Stage
 /// 1's own geometry and text — no vision model. See the [module docs](self) for which
@@ -186,11 +349,14 @@ const FORMULA_MIN_MATH_DENSITY: f32 = 0.15;
 pub fn classify_regions(document: &Document) -> Vec<Region> {
     let mut regions = Vec::new();
     let repeated_bands = repeated_running_bands(document);
+    // Threaded across every page, not reset per page, so a multi-page document gets at
+    // most one `Title` overall (the first oversized block near the top of its first
+    // page) -- a long PDF shouldn't emit one spurious `#` per page.
+    let mut seen_title = false;
 
     for page in &document.pages {
         let body_font_size = body_median_font_size(page);
         let page_predominantly_bold = page_is_predominantly_bold(page);
-        let mut seen_title = false;
 
         let table_regions = crate::graphics::detect_table_regions(&page.graphics, page);
         let picture_regions = crate::graphics::detect_picture_regions(&page.graphics, page);
@@ -206,7 +372,7 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
             })
             .collect();
         let borderless_table_regions =
-            detect_borderless_table_regions(&ungraphed_blocks, page.height);
+            detect_borderless_table_regions(&ungraphed_blocks, page.height, page.index);
 
         for block in &page.blocks {
             // A block claimed by the graphics layer (its center sits inside a detected
@@ -238,6 +404,7 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
                 class,
                 bbox: block.bbox,
                 confidence,
+                page: page.index,
             });
         }
 
@@ -249,17 +416,22 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
     regions
 }
 
-/// Detects borderless table rows from text geometry alone: a band of `blocks` that share
-/// the same vertical span, sit side by side with no vertical overlap between neighbours,
-/// and are separated by a gutter wide enough that it can't be ordinary word-wrapping.
+/// Detects borderless tables from text geometry alone: bands of `blocks` that share the
+/// same vertical span, sit side by side with no vertical overlap between neighbours, and
+/// are separated by a gutter wide enough that it can't be ordinary word-wrapping --
+/// stacked vertically-adjacent bands with matching column counts and aligned column
+/// starts are merged into one multi-row [`Region`], rather than emitted as a separate
+/// single-row region each (see [`rows_are_compatible`]): a real table has several rows,
+/// and treating each one as its own table produced as many degenerate one-row GFM tables
+/// as the source had rows -- see `docs/pitfall_registry.json`'s `borderless_table` entry.
 ///
 /// This is the text-layer counterpart to [`crate::graphics::detect_table_regions`], for
 /// tables with no ruling lines to key a grid off of -- see `docs/pitfall_registry.json`'s
 /// `multi_line_table_cell` entry. Unlike the ruling-line detector, this one has no grid
-/// geometry to reconstruct cells from, so it only ever emits one [`Region`] per row band;
-/// [`crate::serialize`]'s renderer falls back to ordering a row band's own blocks
-/// left-to-right when [`crate::graphics::table_grid_cells`] finds no ruling lines to work
-/// from.
+/// geometry to reconstruct cells from, so [`crate::serialize`]'s renderer re-derives rows
+/// from the region's own member blocks (clustering them back into rows the same way this
+/// function does, via [`cluster_blocks_by_vertical_band`]) when
+/// [`crate::graphics::table_grid_cells`] finds no ruling lines to work from.
 ///
 /// A candidate band qualifies as a table row only when *all* of these hold, each guarding
 /// against a specific way ordinary body text can look like a row of side-by-side blocks:
@@ -301,11 +473,116 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
 /// let right = cell("42", BBox { left: 340.0, bottom: 698.0, right: 351.0, top: 709.0 });
 /// let blocks = [&left, &right];
 ///
-/// let regions = detect_borderless_table_regions(&blocks, 792.0);
+/// let regions = detect_borderless_table_regions(&blocks, 792.0, 0);
 /// assert_eq!(regions.len(), 1);
 /// assert_eq!(regions[0].class, RegionClass::Table);
 /// ```
-pub fn detect_borderless_table_regions(blocks: &[&Block], page_height: f32) -> Vec<Region> {
+pub fn detect_borderless_table_regions(
+    blocks: &[&Block],
+    page_height: f32,
+    page: usize,
+) -> Vec<Region> {
+    let mut valid_rows: Vec<Vec<&Block>> = cluster_blocks_by_vertical_band(blocks)
+        .into_iter()
+        .filter_map(|mut band| {
+            if band.len() < 2 {
+                return None;
+            }
+            band.sort_by(|a, b| a.bbox.left.partial_cmp(&b.bbox.left).unwrap());
+
+            let widest = band.iter().map(|b| b.bbox.width()).fold(0.0_f32, f32::max);
+            let narrowest_gutter = band
+                .windows(2)
+                .map(|pair| pair[1].bbox.left - pair[0].bbox.right)
+                .fold(f32::INFINITY, f32::min);
+            if narrowest_gutter < widest {
+                return None;
+            }
+
+            let tallest = band.iter().map(|b| b.bbox.height()).fold(0.0_f32, f32::max);
+            if tallest > page_height * BORDERLESS_TABLE_ROW_MAX_HEIGHT_FRACTION {
+                return None;
+            }
+
+            if band.iter().any(|b| band_of(b, page_height).is_some()) {
+                return None;
+            }
+
+            Some(band)
+        })
+        .collect();
+
+    // Top to bottom, so adjacent rows in reading order sit next to each other below,
+    // ready to be merged into one multi-row table.
+    valid_rows.sort_by(|a, b| {
+        let top_a = a.iter().map(|blk| blk.bbox.top).fold(f32::MIN, f32::max);
+        let top_b = b.iter().map(|blk| blk.bbox.top).fold(f32::MIN, f32::max);
+        top_b
+            .partial_cmp(&top_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Each group is a list of rows (not a flattened list of blocks): compatibility is
+    // checked against the *last row added*, not the group's whole accumulated block
+    // list, so a 3-row merge chain (row 1 compatible with row 2, row 2 compatible with
+    // row 3) doesn't spuriously break because row 3's cell count no longer matches the
+    // *combined* cell count of rows 1+2.
+    let mut groups: Vec<Vec<Vec<&Block>>> = Vec::new();
+    for row in valid_rows {
+        match groups.last().and_then(|g| g.last()) {
+            Some(prev_row) if rows_are_compatible(prev_row, &row) => {
+                groups.last_mut().unwrap().push(row);
+            }
+            _ => groups.push(vec![row]),
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|group| {
+            let bbox = group
+                .iter()
+                .flatten()
+                .map(|b| b.bbox)
+                .reduce(|a, b| a.union(&b))?;
+            Some(Region {
+                class: RegionClass::Table,
+                bbox,
+                confidence: 0.5,
+                page,
+            })
+        })
+        .collect()
+}
+
+/// The largest difference, in points, between two rows' matching column's left edges
+/// that still counts as "the same columns" for [`rows_are_compatible`]. Generous enough
+/// to tolerate ordinary cell-content-width jitter (a longer value in one row nudging a
+/// later column's actual text start) without being so wide it merges two structurally
+/// unrelated row bands that simply happen to sit near the same x-positions.
+const ROW_COLUMN_ALIGNMENT_TOLERANCE_PT: f32 = 20.0;
+
+/// `true` if two already-validated table-row bands (each already sorted left to right by
+/// [`detect_borderless_table_regions`]) look like consecutive rows of the *same* table:
+/// the same number of cells, each column's left edge aligned within
+/// [`ROW_COLUMN_ALIGNMENT_TOLERANCE_PT`] of its counterpart in the other row. A
+/// differing cell count or misaligned columns means the two bands are structurally
+/// different -- e.g. one genuinely is a table row and the other is an unrelated
+/// two-column caption pair that happens to sit nearby -- so they stay separate tables
+/// rather than being merged into one inconsistent grid.
+fn rows_are_compatible(a: &[&Block], b: &[&Block]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| (x.bbox.left - y.bbox.left).abs() <= ROW_COLUMN_ALIGNMENT_TOLERANCE_PT)
+}
+
+/// Clusters `blocks` into vertically-overlapping bands via union-find: any two blocks
+/// whose bboxes vertically overlap end up in the same band, transitively. Used both to
+/// find row candidates ([`detect_borderless_table_regions`]) and, on the serialization
+/// side, to re-derive a detected borderless table's rows from its own member blocks (see
+/// [`crate::serialize`]).
+pub(crate) fn cluster_blocks_by_vertical_band<'a>(blocks: &[&'a Block]) -> Vec<Vec<&'a Block>> {
     let mut parent: Vec<usize> = (0..blocks.len()).collect();
 
     fn find(parent: &mut [usize], i: usize) -> usize {
@@ -331,41 +608,7 @@ pub fn detect_borderless_table_regions(blocks: &[&Block], page_height: f32) -> V
         let root = find(&mut parent, i);
         bands.entry(root).or_default().push(block);
     }
-
-    bands
-        .into_values()
-        .filter_map(|mut band| {
-            if band.len() < 2 {
-                return None;
-            }
-            band.sort_by(|a, b| a.bbox.left.partial_cmp(&b.bbox.left).unwrap());
-
-            let widest = band.iter().map(|b| b.bbox.width()).fold(0.0_f32, f32::max);
-            let narrowest_gutter = band
-                .windows(2)
-                .map(|pair| pair[1].bbox.left - pair[0].bbox.right)
-                .fold(f32::INFINITY, f32::min);
-            if narrowest_gutter < widest {
-                return None;
-            }
-
-            let tallest = band.iter().map(|b| b.bbox.height()).fold(0.0_f32, f32::max);
-            if tallest > page_height * BORDERLESS_TABLE_ROW_MAX_HEIGHT_FRACTION {
-                return None;
-            }
-
-            if band.iter().any(|b| band_of(b, page_height).is_some()) {
-                return None;
-            }
-
-            let bbox = band.iter().map(|b| b.bbox).reduce(|a, b| a.union(&b))?;
-            Some(Region {
-                class: RegionClass::Table,
-                bbox,
-                confidence: 0.5,
-            })
-        })
-        .collect()
+    bands.into_values().collect()
 }
 
 /// Splits `line`'s text into non-whitespace tokens, each carrying its own x-extent in
@@ -534,9 +777,10 @@ enum Band {
 
 /// Classifies a single block. `page` supplies the block's geometric context (its
 /// siblings, width, and height) -- `block` itself is expected to be one of `page.blocks`.
-/// `seen_title` is threaded through a page's blocks so at most one [`RegionClass::Title`]
-/// is emitted per page (the first oversized block near the top); later oversized blocks
-/// fall back to [`RegionClass::SectionHeader`]. `repeated_band` is `Some` when this
+/// `seen_title` is threaded across the whole document's blocks (not reset per page) so
+/// at most one [`RegionClass::Title`] is emitted overall (the first oversized block near
+/// the top of the first page); every later oversized block, on any page, falls back to
+/// [`RegionClass::SectionHeader`]. `repeated_band` is `Some` when this
 /// block's band and (normalized) text were found to recur across consecutive pages by
 /// [`repeated_running_bands`] -- the strongest signal, checked first.
 /// `page_predominantly_bold` gates the bold-heading signal (see
@@ -595,6 +839,25 @@ fn classify_block(
 
     if is_caption(&text) && line_count <= SHORT_BLOCK_MAX_LINES {
         return (RegionClass::Caption, 0.6);
+    }
+
+    // A numbered/lettered outline heading ("7 Variants of...", "III. Regulatory...",
+    // "Appendix A: ...") carries no font-size cue at all when it's set at body size, the
+    // same gap the bold-heading rule below fills for bold-at-body-size headings. Checked
+    // after `is_list_item` (a single-digit-run-then-period/paren, "1. Introduction", is
+    // that rule's shape, not this one's -- see `starts_with_heading_number`) and before
+    // the size-based rule, since a numbered heading is never the document `Title`. The
+    // "no wide internal gap" guard excludes a running header/footer's "Chapter 4 ...
+    // Page 12" pagination shape (chapter label, wide gutter, page number), which opens
+    // with the same "Chapter N" prefix as a real numbered heading but is a two-column
+    // band, not a title -- an ordinary heading is a short title-cased phrase with no
+    // multi-space internal run.
+    if starts_with_heading_number(&text)
+        && line_count <= SHORT_BLOCK_MAX_LINES
+        && !text.trim_end().ends_with(['.', '?', '!'])
+        && !text.contains("   ")
+    {
+        return (RegionClass::SectionHeader, 0.55);
     }
 
     if body_font_size > 0.0
@@ -660,14 +923,43 @@ fn is_bold_font_name(name: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
-/// The fraction of `chars`' font names that are bold (see [`is_bold_font_name`]), or
-/// `0.0` for an empty iterator.
+/// A font's own declared weight (`Char::font_weight`) at or above this counts as bold --
+/// the standard OpenType/CSS "Bold" weight class. Preferred over [`is_bold_font_name`]'s
+/// name-substring guess whenever the font program declares a *plausible* numeric weight
+/// (see [`MIN_PLAUSIBLE_FONT_WEIGHT`]), per the `section_header_vs_bold` entry in
+/// `docs/pitfall_registry.json`: a font that declares its weight numerically is a
+/// stronger signal than a name-string guess.
+const BOLD_FONT_WEIGHT_THRESHOLD: u32 = 700;
+
+/// The lowest `Char::font_weight` value trusted as a real declared weight rather than a
+/// PDFium sentinel for "unknown". OpenType's own `usWeightClass` is valid from 1-1000,
+/// but real font programs cluster at 100 ("Thin") and up; PDFium has been observed to
+/// report `Some(0)` for fonts it can't actually resolve a weight for (e.g. a real
+/// `Lato-Bold` in the wild reports weight `0`, not `700` and not `None`) -- trusting that
+/// literally would silently override [`is_bold_font_name`]'s correct, working guess with
+/// a wrong "not bold" answer. `0` (and anything below this floor) falls back to the name
+/// heuristic instead of being read as "declared regular weight".
+const MIN_PLAUSIBLE_FONT_WEIGHT: u32 = 100;
+
+/// `true` if `c` is bold: its own declared [`crate::Char::font_weight`] when the font
+/// program provides a plausible one (see [`MIN_PLAUSIBLE_FONT_WEIGHT`]), falling back to
+/// [`is_bold_font_name`]'s name-substring guess otherwise (many fonts never declare a
+/// numeric weight at all, and some PDFium reports one that isn't trustworthy).
+fn char_is_bold(c: &crate::Char) -> bool {
+    match c.font_weight {
+        Some(weight) if weight >= MIN_PLAUSIBLE_FONT_WEIGHT => weight >= BOLD_FONT_WEIGHT_THRESHOLD,
+        _ => is_bold_font_name(&c.font_name),
+    }
+}
+
+/// The fraction of `chars` that are bold (see [`char_is_bold`]), or `0.0` for an empty
+/// iterator.
 fn bold_char_fraction<'a>(chars: impl Iterator<Item = &'a crate::Char>) -> f32 {
     let mut total = 0usize;
     let mut bold = 0usize;
     for c in chars {
         total += 1;
-        if is_bold_font_name(&c.font_name) {
+        if char_is_bold(c) {
             bold += 1;
         }
     }
@@ -1049,6 +1341,110 @@ fn is_caption(text: &str) -> bool {
     false
 }
 
+/// Returns `true` if `text` opens with a heading-style numbering or label: a bare or
+/// dotted multi-level number ("7 Variants...", "7.2 Simple..."), a roman numeral
+/// followed by `.` ("III. Regulatory..."), or a `Chapter`/`Section`/`Part`/`Appendix`
+/// label immediately followed by a number or single-letter identifier ("Chapter 4",
+/// "Appendix A"). The label form requires that identifier -- "Section lead-in" or
+/// "Chapter 4" running as ordinary body text (a header/footer band, say) starts with the
+/// same keyword as a real "Section 5.1: ..." heading, so the keyword alone isn't
+/// sufficient; it's the identifier after it that's the actual signal. See
+/// [`strip_multilevel_number`] for why a single-digit-run-then-period/paren ("1.
+/// Introduction") is deliberately excluded from the bare-number form: that's
+/// `is_list_item`'s shape, and the two are indistinguishable from text alone.
+fn starts_with_heading_number(text: &str) -> bool {
+    let trimmed = text.trim_start();
+
+    if let Some(rest) = strip_multilevel_number(trimmed) {
+        if rest.starts_with(char::is_whitespace) || rest.starts_with(':') {
+            return true;
+        }
+    }
+
+    if let Some(rest) = strip_roman_numeral(trimmed) {
+        if let Some(after_dot) = rest.strip_prefix('.') {
+            if after_dot.starts_with(char::is_whitespace) {
+                return true;
+            }
+        }
+    }
+
+    ["Chapter", "Section", "Part", "Appendix"]
+        .iter()
+        .any(|keyword| {
+            strip_prefix_ignore_case(trimmed, keyword).is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.starts_with(|c: char| c.is_ascii_digit())
+                    || starts_with_lettered_identifier(rest)
+            })
+        })
+}
+
+/// `true` if `text` opens with a single uppercase ASCII letter used as an identifier
+/// ("A" in "Appendix A", "Appendix A:") rather than the first letter of an ordinary word
+/// ("Overview" in "Appendix Overview") -- i.e. the letter is immediately followed by the
+/// end of the text, whitespace, `:`, or `.`, never by another letter.
+fn starts_with_lettered_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    match chars.next() {
+        None => true,
+        Some(c) => matches!(c, ':' | '.' | ' ' | '\t'),
+    }
+}
+
+/// Strips a bare or dotted multi-level number ("7", "7.2", "7.2.1") from the front of
+/// `text`, returning what follows -- or `None` if `text` doesn't open with one. A
+/// *single*-level number immediately followed by `.` or `)` ("1.", "1)") is excluded:
+/// that exact shape belongs to [`is_list_item`], checked earlier in `classify_block`, and
+/// a single-level numbered list item ("1. Buy milk") and a single-level numbered heading
+/// ("1. Introduction") aren't distinguishable from text shape alone.
+fn strip_multilevel_number(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut end = 0;
+    let mut levels = 0u32;
+    loop {
+        let level_start = end;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == level_start {
+            break;
+        }
+        levels += 1;
+        if bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit) {
+            end += 1; // consume the '.' and continue into the next level
+        } else {
+            break;
+        }
+    }
+    if levels == 0 {
+        return None;
+    }
+    if levels == 1 && matches!(bytes.get(end), Some(b'.') | Some(b')')) {
+        return None;
+    }
+    Some(&text[end..])
+}
+
+/// Strips a short (at most 6 letters -- real outline numbering rarely runs past
+/// "XX"/"XXV") run of uppercase roman-numeral letters from the front of `text`,
+/// returning what follows, or `None` if `text` doesn't open with one.
+fn strip_roman_numeral(text: &str) -> Option<&str> {
+    let end = text
+        .char_indices()
+        .take_while(|(_, c)| matches!(c, 'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'))
+        .take(6)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())?;
+    Some(&text[end..])
+}
+
 /// Returns `true` if `text` opens with a recognized footnote marker: a short bare digit
 /// run (optionally followed by `.` or `)`, then whitespace), a conventional footnote
 /// symbol (`*`, `†`, `‡`, `§`, `¶`), or a superscript digit (`⁰`-`⁹`). Unlike
@@ -1158,6 +1554,26 @@ mod tests {
             text: text.into(),
             bbox,
             words: vec![word_named(text, bbox, font_size, font_name)],
+        }
+    }
+
+    fn line_weighted(text: &str, bbox: BBox, font_size: f32, font_weight: u32) -> Line {
+        let chars = std::iter::repeat_n(
+            Char {
+                font_weight: Some(font_weight),
+                ..char_at(bbox, font_size)
+            },
+            text.chars().count().max(1),
+        )
+        .collect();
+        Line {
+            text: text.into(),
+            bbox,
+            words: vec![Word {
+                text: text.into(),
+                bbox,
+                chars,
+            }],
         }
     }
 
@@ -1793,6 +2209,252 @@ mod tests {
     }
 
     #[test]
+    fn font_weight_outranks_font_name_for_boldness() {
+        // A font that never puts "bold"/"black"/"heavy" in its own name (so
+        // `is_bold_font_name` would say no) but *does* declare a numeric weight of 700+
+        // must still be treated as bold -- `Char::font_weight` outranks the name guess
+        // whenever the font program provides it (see `char_is_bold`).
+        let heading = block(vec![line_weighted(
+            "Results and Discussion",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+            700,
+        )]);
+        let body = block(vec![line(
+            "This section presents the results of the experiment in detail.",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 560.0,
+                top: 595.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![heading, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::SectionHeader);
+    }
+
+    #[test]
+    fn declared_regular_weight_overrides_a_misleadingly_named_font() {
+        // The inverse: a font *named* "...Bold..." but whose program declares a regular
+        // (400) weight should not be treated as bold once a numeric weight is present --
+        // the declared weight is trusted over the name.
+        let text = block(vec![line_weighted(
+            "A font whose name lies about its own weight.",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+            400,
+        )]);
+        assert!(!char_is_bold(&text.lines[0].words[0].chars[0]));
+    }
+
+    #[test]
+    fn zero_font_weight_falls_back_to_font_name() {
+        // Real PDFium has been observed to report `font_weight: Some(0)` for a font it
+        // can't actually resolve a weight for -- a `Lato-Bold` character reporting
+        // weight 0, not 700 and not `None`. Trusting that literally would read a
+        // genuinely bold, correctly-named font as "not bold" and silently override
+        // `is_bold_font_name`'s correct answer. `0` must fall back to the name guess.
+        let bold_named_but_zero_weight = Char {
+            font_name: "Lato-Bold".into(),
+            font_weight: Some(0),
+            ..char_at(BBox::ZERO, 12.0)
+        };
+        assert!(char_is_bold(&bold_named_but_zero_weight));
+    }
+
+    #[test]
+    fn bare_number_heading_is_section_header() {
+        // No font-size or bold cue at all -- the numbering itself ("7 Variants...") is
+        // the only signal, same shape as the real corpus docs this rule was added for.
+        let heading = block(vec![line(
+            "7 Variants of SJ Observer Models",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+        )]);
+        let body = block(vec![line(
+            "Body text discussing the variants in detail.",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 560.0,
+                top: 595.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![heading, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::SectionHeader);
+    }
+
+    #[test]
+    fn roman_numeral_heading_is_section_header() {
+        let heading = block(vec![line(
+            "III. Regulatory Cholesterol",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+        )]);
+        let body = block(vec![line(
+            "Body text about regulation follows here.",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 560.0,
+                top: 595.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![heading, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::SectionHeader);
+    }
+
+    #[test]
+    fn appendix_letter_heading_is_section_header() {
+        let heading = block(vec![line(
+            "Appendix A: Supplementary Tables",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+        )]);
+        let body = block(vec![line(
+            "Additional tables are provided below.",
+            BBox {
+                left: 40.0,
+                bottom: 500.0,
+                right: 560.0,
+                top: 595.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![heading, body])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::SectionHeader);
+    }
+
+    #[test]
+    fn plain_sentence_starting_with_a_heading_keyword_is_not_promoted() {
+        // "Section lead-in" opens with the same keyword a real "Section 5.1: ..."
+        // heading does, but isn't followed by a number or lettered identifier -- must
+        // stay Text, not get promoted just because it starts with "Section".
+        let text = block(vec![line(
+            "Section lead-in text continues normally from here on.",
+            BBox {
+                left: 40.0,
+                bottom: 600.0,
+                right: 560.0,
+                top: 615.0,
+            },
+            10.0,
+        )]);
+        let doc = Document {
+            pages: vec![page_at(0, 800.0, vec![text])],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Text);
+    }
+
+    #[test]
+    fn single_document_title_survives_across_pages() {
+        // `seen_title` is threaded across the whole document now, not reset per page --
+        // a second oversized block on page 2 must fall back to `SectionHeader`, not
+        // become a second `Title`.
+        let title = block(vec![line(
+            "The Document Title",
+            BBox {
+                left: 40.0,
+                bottom: 700.0,
+                right: 560.0,
+                top: 730.0,
+            },
+            20.0,
+        )]);
+        let page1_body = block(vec![line(
+            "Page one body text at ordinary size.",
+            BBox {
+                left: 40.0,
+                bottom: 400.0,
+                right: 560.0,
+                top: 416.0,
+            },
+            10.0,
+        )]);
+        let page2_heading = block(vec![line(
+            "A Second Oversized Block",
+            BBox {
+                left: 40.0,
+                bottom: 700.0,
+                right: 560.0,
+                top: 730.0,
+            },
+            20.0,
+        )]);
+        let page2_body = block(vec![line(
+            "Page two body text at ordinary size.",
+            BBox {
+                left: 40.0,
+                bottom: 400.0,
+                right: 560.0,
+                top: 416.0,
+            },
+            10.0,
+        )]);
+
+        let doc = Document {
+            pages: vec![
+                page_at(0, 800.0, vec![title, page1_body]),
+                page_at(1, 800.0, vec![page2_heading, page2_body]),
+            ],
+        };
+        let regions = classify_regions(&doc);
+
+        assert_eq!(regions[0].class, RegionClass::Title);
+        assert_eq!(regions[2].class, RegionClass::SectionHeader);
+    }
+
+    #[test]
     fn bold_sentence_is_not_promoted() {
         // Headings aren't sentences -- a bold block ending in sentence punctuation
         // (e.g. an emphasized run-in sentence) should stay Text.
@@ -2250,5 +2912,117 @@ mod tests {
         // with a multi-byte character positioned to misalign a byte-length prefix
         // check, must be classified rather than panicking.
         assert!(!is_caption("AΩΩ text that just happens to start this way."));
+    }
+
+    fn cell(text: &str, bbox: BBox) -> Block {
+        block(vec![line(text, bbox, 10.0)])
+    }
+
+    #[test]
+    fn stacked_compatible_rows_merge_into_one_borderless_table() {
+        // Three row bands, each two side-by-side cells, aligned column starts and equal
+        // cell counts -- must merge into ONE table region spanning all three rows, not
+        // three separate single-row regions (the defect that made every borderless
+        // table degenerate into N header-only 1-row GFM tables).
+        let row = |y: f32, left_text: &str, right_text: &str| {
+            vec![
+                cell(
+                    left_text,
+                    BBox {
+                        left: 72.0,
+                        bottom: y,
+                        right: 165.0,
+                        top: y + 15.0,
+                    },
+                ),
+                cell(
+                    right_text,
+                    BBox {
+                        left: 340.0,
+                        bottom: y,
+                        right: 351.0,
+                        top: y + 15.0,
+                    },
+                ),
+            ]
+        };
+        let mut all = Vec::new();
+        all.extend(row(690.0, "Item", "42"));
+        all.extend(row(660.0, "Widget", "17"));
+        all.extend(row(630.0, "Gadget", "9"));
+        let refs: Vec<&Block> = all.iter().collect();
+
+        let regions = detect_borderless_table_regions(&refs, 792.0, 0);
+        assert_eq!(
+            regions.len(),
+            1,
+            "expected one merged table, got {regions:?}"
+        );
+    }
+
+    #[test]
+    fn incompatible_adjacent_rows_stay_separate_tables() {
+        // A 2-cell row directly above a 3-cell row -- different cell counts, so these
+        // are structurally different bands and must not be merged into one grid.
+        let two_cell = vec![
+            cell(
+                "Item",
+                BBox {
+                    left: 72.0,
+                    bottom: 690.0,
+                    right: 165.0,
+                    top: 705.0,
+                },
+            ),
+            cell(
+                "42",
+                BBox {
+                    left: 340.0,
+                    bottom: 690.0,
+                    right: 351.0,
+                    top: 705.0,
+                },
+            ),
+        ];
+        let three_cell = vec![
+            cell(
+                "A",
+                BBox {
+                    left: 72.0,
+                    bottom: 660.0,
+                    right: 100.0,
+                    top: 675.0,
+                },
+            ),
+            cell(
+                "B",
+                BBox {
+                    left: 200.0,
+                    bottom: 660.0,
+                    right: 228.0,
+                    top: 675.0,
+                },
+            ),
+            cell(
+                "C",
+                BBox {
+                    left: 340.0,
+                    bottom: 660.0,
+                    right: 368.0,
+                    top: 675.0,
+                },
+            ),
+        ];
+        let mut all = Vec::new();
+        all.extend(two_cell);
+        all.extend(three_cell);
+        let refs: Vec<&Block> = all.iter().collect();
+
+        let regions = detect_borderless_table_regions(&refs, 792.0, 0);
+        assert_eq!(
+            regions.len(),
+            2,
+            "expected two separate tables, got {regions:?}"
+        );
     }
 }

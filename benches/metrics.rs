@@ -43,6 +43,7 @@ fn region(class: RegionClass, b: BBox) -> Region {
         class,
         bbox: b,
         confidence: 1.0,
+        page: 0,
     }
 }
 

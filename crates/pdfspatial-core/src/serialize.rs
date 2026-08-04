@@ -87,7 +87,7 @@ pub fn to_markdown(document: &Document) -> String {
 /// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block], ..Default::default() };
 /// let doc = Document { pages: vec![page] };
 ///
-/// let regions = vec![Region { class: RegionClass::Title, bbox, confidence: 1.0 }];
+/// let regions = vec![Region { class: RegionClass::Title, bbox, confidence: 1.0, page: 0 }];
 /// assert_eq!(to_markdown_structured(&doc, &regions), "# Title");
 /// ```
 pub fn to_markdown_structured(document: &Document, regions: &[Region]) -> String {
@@ -178,20 +178,23 @@ pub fn to_markdown_structured_with(
         .join(separator)
 }
 
-/// Runs the full Stage 2/4a chain in one call: classifies `document`'s regions
+/// Runs the full Stage 2/4a chain in one call: splits blocks at internal style breaks
+/// ([`crate::layout::split_blocks_at_style_breaks`]), classifies regions
 /// ([`crate::layout::classify_regions`]), reassembles reading order
 /// ([`crate::assemble::assemble_reading_order`]), and serializes the result
 /// ([`to_markdown_structured_with`]).
 ///
-/// Classification runs on the *original* document, before reassembly: it operates on
-/// each block's own geometry (font size, position, shape) and doesn't depend on
-/// cross-block ordering, so the sequence doesn't affect its output. Serialization,
-/// though, uses the *reassembled* document's blocks matched back against those regions
-/// by IoU -- [`to_markdown_structured_with`]'s docs. That match is deliberately
-/// tolerant (see `MATCH_IOU_THRESHOLD`) rather than exact, because reassembly can union
-/// bounding boxes together (e.g. stitching a paragraph split across a page boundary),
-/// which nudges a block's bbox just enough that exact equality would silently drop the
-/// match.
+/// The style-break split runs first, over a *copy* of `document` -- see
+/// [`crate::layout::split_blocks_at_style_breaks`]'s docs for why this lives here rather
+/// than in Stage 1 extraction. Classification then runs on the *split* document, before
+/// reassembly: it operates on each block's own geometry (font size, position, shape) and
+/// doesn't depend on cross-block ordering, so the sequence doesn't affect its output.
+/// Serialization, though, uses the *reassembled* document's blocks matched back against
+/// those regions by IoU -- [`to_markdown_structured_with`]'s docs. That match is
+/// deliberately tolerant (see `MATCH_IOU_THRESHOLD`) rather than exact, because
+/// reassembly can union bounding boxes together (e.g. stitching a paragraph split across
+/// a page boundary), which nudges a block's bbox just enough that exact equality would
+/// silently drop the match.
 ///
 /// # Examples
 ///
@@ -209,8 +212,9 @@ pub fn to_markdown_structured_with(
 /// assert_eq!(to_markdown_pipeline(&doc, MarkdownOptions::default()), "Hello");
 /// ```
 pub fn to_markdown_pipeline(document: &Document, options: MarkdownOptions) -> String {
-    let regions = layout::classify_regions(document);
-    let reordered = crate::assemble::assemble_reading_order(document);
+    let split = layout::split_blocks_at_style_breaks(document);
+    let regions = layout::classify_regions(&split);
+    let reordered = crate::assemble::assemble_reading_order(&split);
     to_markdown_structured_with(&reordered, &regions, options)
 }
 
@@ -232,12 +236,21 @@ fn render_page(page: &Page, regions: &[Region], options: MarkdownOptions) -> Str
         Picture,
     }
 
-    let table_regions: Vec<&Region> = regions
+    // `regions` is the whole document's region list (one flat `Vec` covering every
+    // page -- `Region::page` is what disambiguates them, since two different pages'
+    // bbox coordinate spaces both start near `(0, 0)` and can otherwise collide). Scope
+    // to this page *before* doing anything else below, or a picture/table on another
+    // page can suppress this page's text or duplicate its own placeholder once per page.
+    let page_regions: Vec<&Region> = regions.iter().filter(|r| r.page == page.index).collect();
+
+    let table_regions: Vec<&Region> = page_regions
         .iter()
+        .copied()
         .filter(|r| r.class == RegionClass::Table)
         .collect();
-    let picture_regions: Vec<&Region> = regions
+    let picture_regions: Vec<&Region> = page_regions
         .iter()
+        .copied()
         .filter(|r| r.class == RegionClass::Picture)
         .collect();
 
@@ -277,7 +290,7 @@ fn render_page(page: &Page, regions: &[Region], options: MarkdownOptions) -> Str
     items
         .into_iter()
         .filter_map(|(_, item)| match item {
-            Item::Block(block) => render_block(block, regions),
+            Item::Block(block) => render_block(block, &page_regions),
             Item::Table(table) => {
                 graphics::table_grid_cells(table.bbox, &page.graphics, &page.blocks)
                     .or_else(|| borderless_table_row(table.bbox, &page.blocks))
@@ -294,8 +307,11 @@ fn render_page(page: &Page, regions: &[Region], options: MarkdownOptions) -> Str
 /// `borderless_table` entry), told apart by how many blocks the region covers:
 ///
 /// - Several blocks side by side ([`crate::layout::detect_borderless_table_regions`]):
-///   there's no per-line column signal to split on, so this falls back to the region's
-///   own member blocks, ordered left to right, as a single row.
+///   there's no per-line column signal to split on, so each of the region's own member
+///   blocks is re-clustered back into rows by vertical band (the same clustering
+///   [`crate::layout::detect_borderless_table_regions`] used to detect the table in the
+///   first place -- [`crate::layout::cluster_blocks_by_vertical_band`]), each row's
+///   blocks ordered left to right, rows ordered top to bottom.
 /// - One block whose own lines carry the columns as aligned whitespace runs
 ///   ([`crate::layout::whitespace_column_corridors`]): each line becomes its own row,
 ///   split at the block's shared corridors, with the first line's row doubling as the
@@ -309,7 +325,7 @@ fn render_page(page: &Page, regions: &[Region], options: MarkdownOptions) -> Str
 /// Only called when [`graphics::table_grid_cells`] already returned `None`, so a
 /// ruling-line table always prefers its own reconstructed grid over this fallback.
 fn borderless_table_row(table_bbox: crate::BBox, blocks: &[Block]) -> Option<Vec<Vec<String>>> {
-    let mut cells: Vec<&Block> = blocks
+    let cells: Vec<&Block> = blocks
         .iter()
         .filter(|b| table_bbox.contains_center(&b.bbox))
         .collect();
@@ -324,13 +340,25 @@ fn borderless_table_row(table_bbox: crate::BBox, blocks: &[Block]) -> Option<Vec
         }
     }
 
-    cells.sort_by(|a, b| a.bbox.left.partial_cmp(&b.bbox.left).unwrap());
-    Some(vec![
-        cells
-            .into_iter()
-            .map(|b| b.text().replace('\n', "<br>"))
+    let mut rows = layout::cluster_blocks_by_vertical_band(&cells);
+    rows.sort_by(|a, b| {
+        let top_a = a.iter().map(|blk| blk.bbox.top).fold(f32::MIN, f32::max);
+        let top_b = b.iter().map(|blk| blk.bbox.top).fold(f32::MIN, f32::max);
+        top_b
+            .partial_cmp(&top_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Some(
+        rows.into_iter()
+            .map(|mut row| {
+                row.sort_by(|a, b| a.bbox.left.partial_cmp(&b.bbox.left).unwrap());
+                row.into_iter()
+                    .map(|b| b.text().replace('\n', "<br>"))
+                    .collect()
+            })
             .collect(),
-    ])
+    )
 }
 
 /// Splits each of `block`'s lines into cells at `corridors` (as detected by
@@ -399,14 +427,26 @@ fn render_gfm_table(rows: &[Vec<String>]) -> String {
 /// [`RegionClass::Picture`] blocks are handled by [`render_page`] before this is called
 /// and never reach the fallback arm here as anything but a plain paragraph if somehow
 /// unmatched.
-fn render_block(block: &Block, regions: &[Region]) -> Option<String> {
-    let class = regions
+fn render_block(block: &Block, regions: &[&Region]) -> Option<String> {
+    let matchable = regions
         .iter()
-        .filter(|r| r.class != RegionClass::Table && r.class != RegionClass::Picture)
-        .map(|r| (r, metrics::iou(r.bbox, block.bbox)))
-        .filter(|(_, iou)| *iou >= MATCH_IOU_THRESHOLD)
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(r, _)| r.class);
+        .filter(|r| r.class != RegionClass::Table && r.class != RegionClass::Picture);
+
+    // An exact bbox match (the common case: classification and serialization see the
+    // same block) is preferred over the fuzzy IoU fallback below, so a block never gets
+    // silently downgraded to a plain paragraph by float drift in an *unrelated*
+    // region's bbox happening to also clear MATCH_IOU_THRESHOLD.
+    let class = matchable
+        .clone()
+        .find(|r| r.bbox == block.bbox)
+        .map(|r| r.class)
+        .or_else(|| {
+            matchable
+                .map(|r| (r, metrics::iou(r.bbox, block.bbox)))
+                .filter(|(_, iou)| *iou >= MATCH_IOU_THRESHOLD)
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(r, _)| r.class)
+        });
     let text = block.text();
 
     match class {
@@ -498,6 +538,7 @@ mod tests {
             class: RegionClass::ListItem,
             bbox,
             confidence: 1.0,
+            page: 0,
         }];
 
         assert_eq!(to_markdown_structured(&doc, &regions), "- first point");
@@ -524,11 +565,13 @@ mod tests {
                 class: RegionClass::PageHeader,
                 bbox: header_bbox,
                 confidence: 1.0,
+                page: 0,
             },
             Region {
                 class: RegionClass::Text,
                 bbox: body_bbox,
                 confidence: 1.0,
+                page: 0,
             },
         ];
 
@@ -611,6 +654,7 @@ mod tests {
             class: RegionClass::Table,
             bbox: block.bbox,
             confidence: 0.5,
+            page: 0,
         }];
 
         assert_eq!(
@@ -718,10 +762,72 @@ mod tests {
             class: RegionClass::Table,
             bbox: table_bbox,
             confidence: 0.75,
+            page: 0,
         }];
 
         let out = to_markdown_structured(&doc, &regions);
         assert_eq!(out, "| Name | Age |\n| --- | --- |\n| Ada | 36 |");
+    }
+
+    #[test]
+    fn borderless_multi_row_table_renders_as_one_gfm_table_with_body_rows() {
+        // Three row bands of side-by-side blocks, no ruling lines at all -- must render
+        // as ONE GFM table with a header row plus two body rows, not three separate
+        // header-only 1-row tables (the defect `layout::detect_borderless_table_regions`
+        // merging compatible adjacent rows into one `Region` fixes).
+        let row = |y: f32, left_text: &str, right_text: &str| {
+            vec![
+                block(
+                    left_text,
+                    BBox {
+                        left: 72.0,
+                        bottom: y,
+                        right: 165.0,
+                        top: y + 15.0,
+                    },
+                ),
+                block(
+                    right_text,
+                    BBox {
+                        left: 340.0,
+                        bottom: y,
+                        right: 351.0,
+                        top: y + 15.0,
+                    },
+                ),
+            ]
+        };
+        let mut blocks = Vec::new();
+        blocks.extend(row(690.0, "Item", "Count"));
+        blocks.extend(row(660.0, "Widget", "17"));
+        blocks.extend(row(630.0, "Gadget", "9"));
+        let table_bbox = blocks
+            .iter()
+            .map(|b| b.bbox)
+            .reduce(|a, b| a.union(&b))
+            .unwrap();
+
+        let doc = Document {
+            pages: vec![crate::Page {
+                index: 0,
+                width: 612.0,
+                height: 792.0,
+                blocks,
+                ..Default::default()
+            }],
+        };
+        let regions = vec![Region {
+            class: RegionClass::Table,
+            bbox: table_bbox,
+            confidence: 0.5,
+            page: 0,
+        }];
+
+        let out = to_markdown_structured(&doc, &regions);
+        assert_eq!(
+            out,
+            "| Item | Count |\n| --- | --- |\n| Widget | 17 |\n| Gadget | 9 |"
+        );
     }
 
     #[test]
@@ -744,6 +850,7 @@ mod tests {
             class: RegionClass::Picture,
             bbox: picture_bbox,
             confidence: 0.7,
+            page: 0,
         }];
 
         assert_eq!(to_markdown_structured(&doc, &regions), "![]()");
@@ -765,6 +872,7 @@ mod tests {
             class: RegionClass::Footnote,
             bbox: footnote_bbox,
             confidence: 0.55,
+            page: 0,
         }];
 
         assert_eq!(
@@ -798,6 +906,7 @@ mod tests {
             class: RegionClass::Title,
             bbox: region_bbox,
             confidence: 1.0,
+            page: 0,
         }];
 
         assert_eq!(to_markdown_structured(&doc, &regions), "# Heading");

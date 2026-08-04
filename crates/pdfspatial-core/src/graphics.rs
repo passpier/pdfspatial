@@ -60,6 +60,16 @@ const MIN_GRID_LINES: usize = 2;
 /// highlight or table-cell shading).
 const MIN_PICTURE_FILL_AREA_PT2: f32 = 900.0; // 30pt x 30pt
 
+/// An `Image` graphic covering at least this fraction of the page's area is a candidate
+/// full-page background (a slide deck's backdrop, a scanned page's underlay) rather than
+/// an embedded photo/figure, and so is only kept as a [`RegionClass::Picture`] if it
+/// contains no real text blocks -- the same "no text inside" guard [`detect_picture_regions`]
+/// already applies to a large `Fill`. Below this fraction, an `Image` is kept unconditionally
+/// even when it contains blocks, since a normal embedded chart/photo legitimately carries
+/// small in-image labels (axis ticks, legend text) that are part of the picture's own
+/// content, not separate body text the picture is wrongly swallowing.
+const FULL_PAGE_IMAGE_AREA_FRACTION: f32 = 0.5;
+
 /// Detects table regions from ruling lines: [`Graphic`]s that are stroked, thin on one
 /// axis, and long on the other. Lines are unioned into connected grid components (any two
 /// lines whose bounding boxes lie within [`GRID_TOLERANCE_PT`] of touching are merged);
@@ -113,7 +123,7 @@ const MIN_PICTURE_FILL_AREA_PT2: f32 = 900.0; // 30pt x 30pt
 /// assert_eq!(tables.len(), 1);
 /// assert_eq!(tables[0].bbox, BBox { left: 40.0, bottom: 60.0, right: 200.0, top: 100.0 });
 /// ```
-pub fn detect_table_regions(graphics: &[Graphic], _page: &Page) -> Vec<Region> {
+pub fn detect_table_regions(graphics: &[Graphic], page: &Page) -> Vec<Region> {
     let lines: Vec<&Graphic> = graphics.iter().filter(|g| is_ruling_line(g)).collect();
     if lines.is_empty() {
         return Vec::new();
@@ -135,15 +145,28 @@ pub fn detect_table_regions(graphics: &[Graphic], _page: &Page) -> Vec<Region> {
                 class: RegionClass::Table,
                 bbox,
                 confidence: 0.75,
+                page: page.index,
             })
         })
         .collect()
 }
 
-/// Detects picture regions: every `Image`/`XObjectForm` [`Graphic`] outright, plus any
-/// `Fill` graphic covering at least [`MIN_PICTURE_FILL_AREA_PT2`] whose bbox contains no
-/// `page`'s text blocks (a vector illustration or solid photo backdrop with no embedded
-/// raster to key off).
+/// Detects picture regions: every `Image`/`XObjectForm` [`Graphic`] outright (unless it
+/// covers at least [`FULL_PAGE_IMAGE_AREA_FRACTION`] of the page *and* contains real text
+/// blocks -- see below), plus any `Fill` graphic covering at least
+/// [`MIN_PICTURE_FILL_AREA_PT2`] whose bbox contains no `page`'s text blocks (a vector
+/// illustration or solid photo backdrop with no embedded raster to key off).
+///
+/// A normal embedded photo or chart legitimately contains small in-image labels (axis
+/// ticks, a legend), so `Image` graphics are kept unconditionally regardless of what text
+/// blocks fall inside them -- unlike `Fill`, no "no text inside" guard applies by default.
+/// But a raster covering most of the page is a different shape: a slide deck's background
+/// image or a scanned page's underlay, with real independent body text laid over the top
+/// of it as separate PDF text objects. Treating that as one big `Picture` region would
+/// make [`crate::layout::classify_regions`]/[`crate::serialize::render_page`] drop every
+/// block on the page (their centers all fall inside a full-page bbox), so a
+/// [`FULL_PAGE_IMAGE_AREA_FRACTION`]-or-larger `Image` gets the same "no text inside" guard
+/// the `Fill` branch already has.
 ///
 /// # Examples
 ///
@@ -165,13 +188,23 @@ pub fn detect_table_regions(graphics: &[Graphic], _page: &Page) -> Vec<Region> {
 /// assert_eq!(pictures.len(), 1);
 /// ```
 pub fn detect_picture_regions(graphics: &[Graphic], page: &Page) -> Vec<Region> {
+    let page_area = page.width * page.height;
     graphics
         .iter()
         .filter_map(|g| match g.kind {
+            GraphicKind::Image
+                if page_area > 0.0
+                    && (g.bbox.width() * g.bbox.height()) / page_area
+                        >= FULL_PAGE_IMAGE_AREA_FRACTION
+                    && page.blocks.iter().any(|b| block_center_in(b, g.bbox)) =>
+            {
+                None
+            }
             GraphicKind::Image => Some(Region {
                 class: RegionClass::Picture,
                 bbox: g.bbox,
                 confidence: 0.7,
+                page: page.index,
             }),
             GraphicKind::Fill
                 if g.bbox.width() * g.bbox.height() >= MIN_PICTURE_FILL_AREA_PT2
@@ -181,6 +214,7 @@ pub fn detect_picture_regions(graphics: &[Graphic], page: &Page) -> Vec<Region> 
                     class: RegionClass::Picture,
                     bbox: g.bbox,
                     confidence: 0.5,
+                    page: page.index,
                 })
             }
             _ => None,
@@ -526,6 +560,92 @@ mod tests {
         let pictures = detect_picture_regions(&[image], &page());
         assert_eq!(pictures.len(), 1);
         assert_eq!(pictures[0].class, RegionClass::Picture);
+    }
+
+    #[test]
+    fn small_image_containing_text_is_still_a_picture() {
+        // A normal embedded chart/photo legitimately carries small in-image labels (axis
+        // ticks, a legend) -- those are part of the picture's own content, not separate
+        // body text it's wrongly swallowing, so a small Image keeps its "no guard" default.
+        let image = Graphic {
+            kind: GraphicKind::Image,
+            bbox: BBox {
+                left: 50.0,
+                bottom: 50.0,
+                right: 250.0,
+                top: 250.0,
+            },
+            z: 0,
+            stroke_width: 0.0,
+            is_stroked: false,
+            is_filled: true,
+        };
+        let mut p = page();
+        p.blocks.push(cell(
+            "12.3",
+            BBox {
+                left: 100.0,
+                bottom: 100.0,
+                right: 130.0,
+                top: 115.0,
+            },
+        ));
+        let pictures = detect_picture_regions(&[image], &p);
+        assert_eq!(pictures.len(), 1);
+    }
+
+    #[test]
+    fn full_page_image_containing_text_is_not_a_picture() {
+        // A raster covering most of the page (a slide deck's background, a scanned page's
+        // underlay) with real independent body text laid over it should not become one big
+        // Picture region -- that would make every block on the page look like it's "inside
+        // the picture" and get dropped by callers that suppress blocks a picture contains
+        // (see stage5_page_scoping.rs and the opendataloader-bench docs that surfaced this:
+        // 01030000000198/199/200).
+        let image = Graphic {
+            kind: GraphicKind::Image,
+            bbox: BBox {
+                left: 0.0,
+                bottom: 0.0,
+                right: 600.0,
+                top: 800.0,
+            },
+            z: 0,
+            stroke_width: 0.0,
+            is_stroked: false,
+            is_filled: true,
+        };
+        let mut p = page();
+        p.blocks.push(cell(
+            "Real body text on top of the background",
+            BBox {
+                left: 50.0,
+                bottom: 400.0,
+                right: 550.0,
+                top: 430.0,
+            },
+        ));
+        assert!(detect_picture_regions(&[image], &p).is_empty());
+    }
+
+    #[test]
+    fn full_page_image_with_no_text_is_still_a_picture() {
+        // A genuine full-bleed photo with no text over it is unaffected by the guard above.
+        let image = Graphic {
+            kind: GraphicKind::Image,
+            bbox: BBox {
+                left: 0.0,
+                bottom: 0.0,
+                right: 600.0,
+                top: 800.0,
+            },
+            z: 0,
+            stroke_width: 0.0,
+            is_stroked: false,
+            is_filled: true,
+        };
+        let pictures = detect_picture_regions(&[image], &page());
+        assert_eq!(pictures.len(), 1);
     }
 
     #[test]

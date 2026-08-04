@@ -81,12 +81,7 @@
   "section_header_vs_bold": {
     "title": "Section headers vs. bold body text",
     "summary": "`Section-header` misclassified as `Title` or emphasized `Text` when font-weight is the only visual cue",
-    "note": "Char::font_weight now carries PDFium's own reported font weight (extract::extract_char, via PdfPageTextChar::font_weight) alongside the existing font-*name* heuristic (layout::is_bold_font_name). The classifier itself does not yet threshold on the numeric weight -- see unblocked_by.",
-    "blocked": {
-      "reason": "layout::classify_block's bold-heading signal still only reads the font *name* (is_bold_font_name), not the new Char::font_weight field -- the signal now exists in the data model but classify_block hasn't been updated to prefer it over the name heuristic.",
-      "unblocked_by": "Thread a block's median Char::font_weight into classify_block and prefer it over is_bold_font_name when present (a font that declares its weight numerically is a stronger signal than a name-string guess).",
-      "loop_refuses": false
-    }
+    "note": "layout::char_is_bold now prefers Char::font_weight over the font-*name* heuristic (layout::is_bold_font_name) whenever the font program declares a plausible weight -- closing the gap this pitfall was blocked on. One wrinkle found while wiring this up against the real opendataloader-bench corpus (not the synthetic corpus, which can't reproduce it): PDFium has been observed reporting Char::font_weight: Some(0) for a font it can't actually resolve a weight for (a real Lato-Bold character reporting weight 0, not 700 and not None), which would silently override is_bold_font_name's correct answer if trusted literally. char_is_bold's MIN_PLAUSIBLE_FONT_WEIGHT floor (100) treats an implausibly low declared weight as unreliable and falls back to the name heuristic instead -- see layout.rs's zero_font_weight_falls_back_to_font_name test."
   },
   "embedded_font": {
     "title": "Embedded/CID-keyed fonts and ligatures",

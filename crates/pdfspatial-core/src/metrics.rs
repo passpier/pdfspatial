@@ -773,6 +773,7 @@ mod tests {
             class: RegionClass::Text,
             bbox,
             confidence: 1.0,
+            page: 0,
         };
         let predicted = vec![region(bbox(0.0, 0.0, 10.0, 10.0))];
         let ground_truth = vec![region(bbox(0.0, 0.0, 10.0, 10.0))];
@@ -787,6 +788,7 @@ mod tests {
             class: RegionClass::Title,
             bbox,
             confidence: 1.0,
+            page: 0,
         };
         // One predicted region matches, one is a false positive; ground truth has one
         // extra miss.

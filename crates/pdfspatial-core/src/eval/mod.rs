@@ -464,6 +464,7 @@ mod tests {
             class,
             bbox,
             confidence,
+            page: 0,
         }
     }
 

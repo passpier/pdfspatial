@@ -113,6 +113,7 @@ fn image_placeholders_false_removes_picture_markers_but_still_drops_overlapping_
         class: RegionClass::Picture,
         bbox: picture_bbox,
         confidence: 1.0,
+        page: 0,
     }];
 
     let with_placeholder = to_markdown_structured_with(&doc, &regions, MarkdownOptions::default());
