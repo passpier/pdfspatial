@@ -41,7 +41,14 @@ locally and record the hardware (see below).
 Per engine, from the bench's own evaluator (`evaluator.py`), read out of
 `prediction/<engine>/evaluation.json` after `run.py` merges in `speed`:
 
-- **Overall** — mean of NID, TEDS, and MHS per document, averaged across documents.
+- **Overall** — mean of NID, TEDS, and MHS per document, averaged across documents. This
+  is a **ragged** mean, not a simple average of the three published column means: TEDS
+  is `None` (excluded from that document's mean, not scored `0.0`) when the ground truth
+  has no table, and likewise MHS when it has no heading. On this corpus TEDS is scored
+  on only 42 of the 200 documents and MHS on 107, all 200 score NID — so Overall can't be
+  reconstructed by hand from the three published column means, and a change concentrated
+  in a small set of documents can move Overall by more than its share of the column mean
+  would suggest.
 - **NID** (reading order) — `rapidfuzz.fuzz.ratio` similarity between ground-truth and
   predicted Markdown, after collapsing whitespace only. It does **not** strip Markdown
   syntax — see "Known asymmetries" below.
@@ -93,16 +100,31 @@ apples; a multi-job number, if recorded, is a separate footnote, not the table's
   strips Markdown syntax. `pdfspatial`'s faithful default emits a `---` thematic break
   between every page and a `![]()` placeholder for every detected picture; both count as
   inserted document text against ground truth. The `pdfspatial-compact` row exists to
-  isolate exactly this cost.
-- **MHS is structurally capped for `pdfspatial`.** `serialize::to_markdown_structured`
-  only emits `#` (Title) and `##` (SectionHeader) — no `RegionClass` maps to `###` or
-  deeper. Any ground-truth document with a third heading level caps our MHS-S no matter
-  how good the classification is.
-- **TEDS is likely `pdfspatial`'s weakest column.** Tables are reconstructed from ruling
-  lines (`graphics::table_grid_cells`); a borderless/whitespace-delimited table (the
-  `borderless_table` pitfall) produces no GFM table at all on some corpus documents.
-  This is a known, tracked limitation, not measurement noise — see
-  `docs/pitfall_registry.json`'s `borderless_table` entry.
+  isolate exactly this cost -- measured on this corpus, it's small: compact vs. default
+  differ by ~0.002 Overall and ~0.003 NID, not the dominant factor a naive reading of
+  "Markdown syntax is scored as document text" might suggest.
+- **MHS is *not* structurally capped by only emitting `#`/`##`.** An earlier revision of
+  this doc claimed `serialize::to_markdown_structured` emitting no `RegionClass` past
+  `##` caps MHS whenever a ground-truth document has a third heading level. That's wrong
+  on inspection of `evaluator_heading_level.py`: its `HeadingTree` discards the `#`-count
+  entirely and treats every heading level as structurally equivalent (see its own module
+  docstring). Separately, this corpus's ground truth (`generate_groundtruth_markdown.py`)
+  only ever emits a level-1 `#` — there is no `##`+ anywhere in the 200 reference files —
+  so heading depth was never actually in play here. The real driver of a low MHS score
+  was headings **trapped as an interior line of a merged Stage 1 paragraph block**
+  (never becoming their own block, so `classify_block`'s heading rules — which only ever
+  fire on a whole block — never saw them). `layout::split_blocks_at_style_breaks` closes
+  most of that gap as a Stage 2 pre-pass.
+- **TEDS is `pdfspatial`'s weakest column by a wide margin, and the gap is real, not
+  measurement noise.** Two distinct causes, both tracked in
+  `docs/pitfall_registry.json`: a borderless/whitespace-delimited table producing no GFM
+  table at all on some documents (the `borderless_table` pitfall -- partially closed by
+  merging adjacent compatible row bands into one multi-row table instead of N
+  degenerate one-row tables), and real Stage 1 block grouping sometimes merging a
+  bordered table's row cells across the column gap into one block before
+  `graphics::table_grid_cells` ever sees them as separate cells (the
+  `multi_line_table_cell` pitfall -- still open; needs a Stage 1 `extract.rs` change,
+  documented as `blocked` in the registry).
 - **`PageHeader`/`PageFooter` regions are dropped entirely** from `pdfspatial`'s
   structured output. Depending on whether the bench's own ground truth retains running
   headers/footers, this cuts for or against us; check a few ground-truth files directly

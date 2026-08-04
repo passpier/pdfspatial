@@ -137,8 +137,8 @@ Rust extractor):
 |---|---|---|---|---|---|---|
 | pdf-inspector | 0.875 | 0.915 | 0.814 | 0.788 | 0.007s | MIT OR Apache-2.0 |
 | opendataloader | 0.831 | 0.902 | 0.489 | 0.739 | 0.014s | Apache-2.0 |
-| pdfspatial (compact) | 0.602 | 0.811 | 0.064 | 0.229 | 0.003s | MIT OR Apache-2.0 |
-| **pdfspatial** | **0.600** | **0.809** | **0.064** | **0.229** | **0.005s** | MIT OR Apache-2.0 |
+| pdfspatial (compact) | 0.679 | 0.820 | 0.079 | 0.510 | 0.003s | MIT OR Apache-2.0 |
+| **pdfspatial** | **0.677** | **0.817** | **0.079** | **0.508** | **0.004s** | MIT OR Apache-2.0 |
 | markitdown | 0.589 | 0.844 | 0.273 | 0.000 | 0.125s | MIT |
 | liteparse | 0.582 | 0.873 | 0.000 | 0.000 | 2.683s | Apache-2.0 |
 
@@ -155,15 +155,25 @@ Two honest caveats before reading too much into the ranking:
   CLI has no batch mode and pays 200 process spawns inside the timer. Both are
   real properties of the tools being measured, not something this harness
   imposes — see [`bench/opendataloader/README.md`](bench/opendataloader/README.md).
-- **`evaluator_reading_order.py`'s NID only collapses whitespace** — it never
-  strips Markdown syntax, so `pdfspatial`'s faithful `---`/`![]()` output is
-  scored as inserted document text. TEDS is also `pdfspatial`'s weakest
-  column by a wide margin: tables are reconstructed from ruling lines
-  (`graphics::table_grid_cells`), so a borderless/whitespace-delimited table
-  produces no GFM table at all on some corpus documents — a known, tracked
-  limitation (`docs/pitfall_registry.json`'s `borderless_table` entry), not
-  measurement noise. MHS is structurally capped too: `to_markdown_structured`
-  only emits `#`/`##`, with no heading class for `###` or deeper.
+- **Overall is a ragged mean, not the average of the three published
+  columns.** `evaluator.py` scores TEDS/MHS as `None` (excluded from the
+  mean, not scored zero) on a document whose ground truth has no
+  table/heading at all — TEDS is scored on only 42 of the 200 documents,
+  MHS on 107. So Overall can't be reconstructed from NID/TEDS/MHS by hand;
+  see `bench/opendataloader/README.md` for the exact per-document formula.
+  `evaluator_reading_order.py`'s NID also only collapses whitespace — it
+  never strips Markdown syntax, so `pdfspatial`'s faithful `---`/`![]()`
+  output is scored as inserted document text, though the measured cost of
+  that is small (compact vs. default differ by ~0.002 Overall, ~0.003 NID).
+  TEDS is `pdfspatial`'s weakest column by a wide margin — a real, tracked
+  gap (`docs/pitfall_registry.json`'s `borderless_table`/
+  `multi_line_table_cell` entries), not measurement noise: real Stage 1
+  block grouping sometimes merges a table row's cells across the column gap
+  before the ruling-line grid ever sees them as separate cells. MHS is
+  *not* capped by only emitting `#`/`##` — the evaluator's own heading tree
+  treats every level as equivalent, and this corpus's ground truth contains
+  no heading deeper than `#` anyway — the real driver was headings trapped
+  as an interior line of a merged paragraph block, not a missing `###`.
 
 See [`bench/opendataloader/README.md`](bench/opendataloader/README.md) to
 reproduce this table (`./scripts/run-opendataloader-bench.sh`) and
