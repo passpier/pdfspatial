@@ -129,6 +129,13 @@ const FOOTNOTE_FONT_FACTOR: f32 = 0.95;
 /// qualifies.
 const BOLD_CHAR_FRACTION: f32 = 0.8;
 
+/// A borderless-table row candidate's tallest member block must be no taller than this
+/// fraction of the page height -- real body/column text runs the height of the page,
+/// while a table row's cells are short. Same order of magnitude as
+/// [`HEADER_FOOTER_MAX_HEIGHT_FRACTION`], but named separately since the two guard
+/// unrelated heuristics.
+const BORDERLESS_TABLE_ROW_MAX_HEIGHT_FRACTION: f32 = 0.15;
+
 /// Classifies every geometric [`crate::Block`] in `document` into a [`Region`], one
 /// region per block (in document order, page-major), using only heuristics over Stage
 /// 1's own geometry and text — no vision model. See the [module docs](self) for which
@@ -149,6 +156,19 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
         let table_regions = crate::graphics::detect_table_regions(&page.graphics, page);
         let picture_regions = crate::graphics::detect_picture_regions(&page.graphics, page);
 
+        let ungraphed_blocks: Vec<&Block> = page
+            .blocks
+            .iter()
+            .filter(|block| {
+                !table_regions
+                    .iter()
+                    .chain(&picture_regions)
+                    .any(|r| r.bbox.contains_center(&block.bbox))
+            })
+            .collect();
+        let borderless_table_regions =
+            detect_borderless_table_regions(&ungraphed_blocks, page.height);
+
         for block in &page.blocks {
             // A block claimed by the graphics layer (its center sits inside a detected
             // table or picture) is excluded from the text-layer heuristic entirely --
@@ -158,6 +178,7 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
             let claimed_by_graphics = table_regions
                 .iter()
                 .chain(&picture_regions)
+                .chain(&borderless_table_regions)
                 .any(|r| r.bbox.contains_center(&block.bbox));
             if claimed_by_graphics {
                 continue;
@@ -184,9 +205,129 @@ pub fn classify_regions(document: &Document) -> Vec<Region> {
 
         regions.extend(table_regions);
         regions.extend(picture_regions);
+        regions.extend(borderless_table_regions);
     }
 
     regions
+}
+
+/// Detects borderless table rows from text geometry alone: a band of `blocks` that share
+/// the same vertical span, sit side by side with no vertical overlap between neighbours,
+/// and are separated by a gutter wide enough that it can't be ordinary word-wrapping.
+///
+/// This is the text-layer counterpart to [`crate::graphics::detect_table_regions`], for
+/// tables with no ruling lines to key a grid off of -- see `docs/pitfall_registry.json`'s
+/// `multi_line_table_cell` entry. Unlike the ruling-line detector, this one has no grid
+/// geometry to reconstruct cells from, so it only ever emits one [`Region`] per row band;
+/// [`crate::serialize`]'s renderer falls back to ordering a row band's own blocks
+/// left-to-right when [`crate::graphics::table_grid_cells`] finds no ruling lines to work
+/// from.
+///
+/// A candidate band qualifies as a table row only when *all* of these hold, each guarding
+/// against a specific way ordinary body text can look like a row of side-by-side blocks:
+///
+/// - at least two blocks share the band (a single block is never a "row");
+/// - every pair of blocks in the band is horizontally disjoint (no two cells overlap
+///   in x -- if they did, this is one paragraph's wrapped lines caught by the vertical
+///   overlap test, not two cells);
+/// - the *narrowest* gutter between horizontally adjacent blocks is at least as wide as
+///   the band's *widest* block -- multi-column prose (see the `multi_column`/
+///   `list_nesting`/`figure_caption` fixtures) runs a 10-40pt gutter next to
+///   200pt-plus-wide columns, while a short table cell's gutter routinely exceeds its own
+///   width, so this ratio is the load-bearing discriminator between the two;
+/// - every block in the band is shorter than [`BORDERLESS_TABLE_ROW_MAX_HEIGHT_FRACTION`]
+///   of the page (a real body column runs most of the page's height; a table row's cells
+///   don't);
+/// - no block in the band sits in the header/footer band (so a left/right running
+///   header or footer pair, which is otherwise exactly this shape, is never misread as a
+///   table row).
+///
+/// Confidence is fixed at `0.5`: weaker evidence than
+/// [`crate::graphics::detect_table_regions`]'s `0.75`, since ruling lines are direct
+/// structural evidence and this is inferred purely from a gutter-width heuristic.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::layout::{detect_borderless_table_regions, RegionClass};
+/// use pdfspatial_core::{BBox, Block, Line, Word};
+///
+/// fn cell(text: &str, bbox: BBox) -> Block {
+///     let word = Word { text: text.into(), bbox, chars: vec![] };
+///     let line = Line { text: text.into(), bbox, words: vec![word] };
+///     Block { bbox, lines: vec![line] }
+/// }
+///
+/// // A narrow left cell and a far-off right cell sharing a row, wide gutter between them.
+/// let left = cell("Item", BBox { left: 72.0, bottom: 690.0, right: 165.0, top: 709.0 });
+/// let right = cell("42", BBox { left: 340.0, bottom: 698.0, right: 351.0, top: 709.0 });
+/// let blocks = [&left, &right];
+///
+/// let regions = detect_borderless_table_regions(&blocks, 792.0);
+/// assert_eq!(regions.len(), 1);
+/// assert_eq!(regions[0].class, RegionClass::Table);
+/// ```
+pub fn detect_borderless_table_regions(blocks: &[&Block], page_height: f32) -> Vec<Region> {
+    let mut parent: Vec<usize> = (0..blocks.len()).collect();
+
+    fn find(parent: &mut [usize], i: usize) -> usize {
+        if parent[i] != i {
+            parent[i] = find(parent, parent[i]);
+        }
+        parent[i]
+    }
+
+    for i in 0..blocks.len() {
+        for j in (i + 1)..blocks.len() {
+            if blocks[i].bbox.vertically_overlaps(&blocks[j].bbox) {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[ri] = rj;
+                }
+            }
+        }
+    }
+
+    let mut bands: std::collections::BTreeMap<usize, Vec<&Block>> = Default::default();
+    for (i, &block) in blocks.iter().enumerate() {
+        let root = find(&mut parent, i);
+        bands.entry(root).or_default().push(block);
+    }
+
+    bands
+        .into_values()
+        .filter_map(|mut band| {
+            if band.len() < 2 {
+                return None;
+            }
+            band.sort_by(|a, b| a.bbox.left.partial_cmp(&b.bbox.left).unwrap());
+
+            let widest = band.iter().map(|b| b.bbox.width()).fold(0.0_f32, f32::max);
+            let narrowest_gutter = band
+                .windows(2)
+                .map(|pair| pair[1].bbox.left - pair[0].bbox.right)
+                .fold(f32::INFINITY, f32::min);
+            if narrowest_gutter < widest {
+                return None;
+            }
+
+            let tallest = band.iter().map(|b| b.bbox.height()).fold(0.0_f32, f32::max);
+            if tallest > page_height * BORDERLESS_TABLE_ROW_MAX_HEIGHT_FRACTION {
+                return None;
+            }
+
+            if band.iter().any(|b| band_of(b, page_height).is_some()) {
+                return None;
+            }
+
+            let bbox = band.iter().map(|b| b.bbox).reduce(|a, b| a.union(&b))?;
+            Some(Region {
+                class: RegionClass::Table,
+                bbox,
+                confidence: 0.5,
+            })
+        })
+        .collect()
 }
 
 /// Which page edge a block sits against, per [`HEADER_BAND_FRACTION`]/[`FOOTER_BAND_FRACTION`].

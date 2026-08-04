@@ -162,12 +162,39 @@ fn render_page(page: &Page, regions: &[Region]) -> String {
             Item::Block(block) => render_block(block, regions),
             Item::Table(table) => {
                 graphics::table_grid_cells(table.bbox, &page.graphics, &page.blocks)
+                    .or_else(|| borderless_table_row(table.bbox, &page.blocks))
                     .map(|grid| render_gfm_table(&grid))
             }
             Item::Picture => Some("![]()".to_string()),
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Builds a table grid for a [`crate::layout::detect_borderless_table_regions`] region:
+/// unlike [`graphics::table_grid_cells`], there are no ruling lines to reconstruct a grid
+/// from, so this falls back to the region's own member blocks, ordered left to right as a
+/// single row. Returns `None` if no block's center falls inside `table_bbox` (should not
+/// happen for a region [`crate::layout::detect_borderless_table_regions`] itself produced,
+/// since it always encloses the blocks it was built from).
+///
+/// Only called when [`graphics::table_grid_cells`] already returned `None`, so a
+/// ruling-line table always prefers its own reconstructed grid over this fallback.
+fn borderless_table_row(table_bbox: crate::BBox, blocks: &[Block]) -> Option<Vec<Vec<String>>> {
+    let mut cells: Vec<&Block> = blocks
+        .iter()
+        .filter(|b| table_bbox.contains_center(&b.bbox))
+        .collect();
+    if cells.is_empty() {
+        return None;
+    }
+    cells.sort_by(|a, b| a.bbox.left.partial_cmp(&b.bbox.left).unwrap());
+    Some(vec![
+        cells
+            .into_iter()
+            .map(|b| b.text().replace('\n', "<br>"))
+            .collect(),
+    ])
 }
 
 /// Renders a `rows`-by-columns grid (as produced by [`graphics::table_grid_cells`]) as a

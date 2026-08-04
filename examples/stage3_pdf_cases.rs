@@ -226,7 +226,7 @@ fn multi_line_table_cell_expected() -> ExpectedBehavior {
                 class: RegionClass::Table,
             },
         ],
-        requires_extraction_fix: true,
+        requires_extraction_fix: false,
     }
 }
 
@@ -343,12 +343,15 @@ fn cases() -> Vec<CaseSpec> {
             root_cause: RootCause::Classification,
             description: "A borderless two-column row: the left cell wraps onto two \
                 closely-spaced lines while the right cell ('42') is a single line at the \
-                same row as the left cell's first line. Stage 1's block grouping only \
-                clusters by vertical gaps, with no notion of column gutters at the block \
-                level, so the right cell's single line gets merged straight into the left \
-                cell's block as a third line instead of staying its own cell -- losing the \
-                row/column structure entirely, not just the (still-unimplemented) Table \
-                classification on top of it.",
+                same row as the left cell's first line. Stage 1's block grouping \
+                (extract::group_blocks) now carries a horizontal-gutter guard alongside its \
+                vertical-gap test, so the right cell's single line stays a block of its own \
+                instead of merging into the left cell's block as a third line. \
+                layout::detect_borderless_table_regions then classifies the row as a Table \
+                purely from that gutter geometry (no ruling lines needed), and \
+                serialize::render_page falls back to ordering the row's own blocks \
+                left-to-right when graphics::table_grid_cells finds no ruling-line grid to \
+                reconstruct from.",
             font_body: HELVETICA,
             pages: &[(
                 "BT\n/F1 10 Tf\n1 0 0 1 72 700 Tm\n(Item description that) Tj\n\

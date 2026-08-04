@@ -80,6 +80,18 @@ const BLOCK_GAP_FACTOR: f32 = 1.5;
 /// glyph boxes (see [`merge_rotated_text_runs`]) touch edge-to-edge with no overlap at all.
 const BLOCK_OVERLAP_REJECT_FRACTION: f32 = 0.5;
 
+/// A candidate line whose box is horizontally disjoint from the running block's *union*
+/// bbox by more than this multiple of the shorter box's height starts a new block instead
+/// of attaching -- a wide horizontal gap between an otherwise vertically-adjacent pair of
+/// lines means they're two side-by-side table cells or columns, not two lines of the same
+/// paragraph. Compared against the block's accumulated union bbox rather than only the
+/// last line so a paragraph's short last line (e.g. one trailing word, indented or
+/// centered) still attaches as long as it overlaps the paragraph's overall horizontal
+/// span. A generous multiple: ordinary text never leaves this much dead horizontal space
+/// between two lines of the same paragraph, but a table row's column gutter routinely
+/// does.
+const BLOCK_GUTTER_REJECT_FACTOR: f32 = 1.0;
+
 /// A word whose font size differs from the running line's anchor by more than this ratio
 /// (in either direction) never joins that line, no matter how close their vertical centers
 /// sit. Ordinary inline size variation on one line of running text is modest, and
@@ -833,9 +845,12 @@ fn finalize_line(mut words: Vec<Word>) -> Line {
 /// line's bottom and the next line's top larger than [`BLOCK_GAP_FACTOR`] times the
 /// shorter line's height starts a new block, and so does the next line's box
 /// vertically overlapping the running one by more than [`BLOCK_OVERLAP_REJECT_FRACTION`]
-/// (an overlay drawn across the line rather than an adjacent line of the same paragraph).
-/// This is a naive, ML-free paragraph/column detector by design — see [`crate::assemble`]
-/// for where a real reading-order solver eventually replaces it.
+/// (an overlay drawn across the line rather than an adjacent line of the same paragraph),
+/// and so does the next line sitting more than [`BLOCK_GUTTER_REJECT_FACTOR`] times its
+/// height away from the block's horizontal span (a neighbouring column or table cell
+/// rather than the next line of the same paragraph). This is a naive, ML-free
+/// paragraph/column detector by design — see [`crate::assemble`] for where a real reading-
+/// order solver eventually replaces it.
 fn group_blocks(lines: Vec<Line>) -> Vec<Block> {
     let mut block_groups: Vec<Vec<Line>> = Vec::new();
 
@@ -845,8 +860,14 @@ fn group_blocks(lines: Vec<Line>) -> Vec<Block> {
             let gap = prev.bbox.bottom - line.bbox.top;
             let shorter_height = prev.bbox.height().min(line.bbox.height()).max(1.0);
             let overlap = vertical_overlap(&prev.bbox, &line.bbox);
+
+            let block_bbox =
+                union_all(block.iter().map(|l| l.bbox)).expect("block always has ≥1 line");
+            let gutter = horizontal_gap(&block_bbox, &line.bbox);
+
             gap <= shorter_height * BLOCK_GAP_FACTOR
                 && overlap <= shorter_height * BLOCK_OVERLAP_REJECT_FRACTION
+                && gutter <= shorter_height * BLOCK_GUTTER_REJECT_FACTOR
         });
 
         if attaches_to_last {
@@ -863,6 +884,14 @@ fn group_blocks(lines: Vec<Line>) -> Vec<Block> {
             Block { bbox, lines }
         })
         .collect()
+}
+
+/// The horizontal distance between two boxes, in points, or 0.0 if they overlap or merely
+/// touch. The horizontal-axis counterpart of [`vertical_overlap`], but a gap (never
+/// negative) rather than a signed overlap magnitude, since [`group_blocks`] only needs to
+/// know how far apart two boxes are, not by how much they overlap.
+fn horizontal_gap(a: &BBox, b: &BBox) -> f32 {
+    (a.left.max(b.left) - a.right.min(b.right)).max(0.0)
 }
 
 /// The length of the vertical overlap between two boxes, in points, or 0.0 if they merely
