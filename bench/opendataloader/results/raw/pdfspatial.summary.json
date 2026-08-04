@@ -1,0 +1,9 @@
+{
+    "engine_name": "pdfspatial",
+    "engine_version": "0.1.0",
+    "processor": "Apple M2 Pro",
+    "document_count": 200,
+    "total_elapsed": 0.9932692050933838,
+    "elapsed_per_doc": 0.004966346025466919,
+    "date": "2026-08-04"
+}

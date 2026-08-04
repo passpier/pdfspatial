@@ -1084,11 +1084,14 @@ fn starts_with_footnote_marker(text: &str) -> bool {
 }
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    if text.len() < prefix.len() {
-        return None;
-    }
-    let (head, tail) = text.split_at(prefix.len());
-    head.eq_ignore_ascii_case(prefix).then_some(tail)
+    // `text.get(..prefix.len())` (rather than `text.split_at`/direct slicing) returns
+    // `None` both when `text` is shorter than `prefix` and when `prefix.len()` lands
+    // inside a multi-byte character -- a real PDF's caption/heading text can carry
+    // non-ASCII characters (e.g. "Ω" in a physics caption) before the prefix-length
+    // byte offset, which `split_at` would otherwise panic on.
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
 }
 
 #[cfg(test)]
@@ -2220,5 +2223,32 @@ mod tests {
         let regions = classify_regions(&doc);
 
         assert_eq!(regions[0].class, RegionClass::Table);
+    }
+
+    #[test]
+    fn strip_prefix_ignore_case_does_not_panic_on_multibyte_boundary() {
+        // Regression test: `strip_prefix_ignore_case` used to `str::split_at` at
+        // `prefix.len()` unconditionally, which panics if that byte offset lands
+        // inside a multi-byte character. "AΩΩ text" puts the second (2-byte) Ω at
+        // byte offset 3..5, so slicing at byte 4 -- "Fig."'s length -- lands mid-glyph,
+        // reproducing the exact panic a real corpus PDF hit (a physics caption
+        // opening with "Ω") in `pdfspatial-core`'s opendataloader-bench run.
+        assert_eq!(strip_prefix_ignore_case("AΩΩ text", "Fig."), None);
+        assert_eq!(strip_prefix_ignore_case("AΩΩ text", "Table"), None);
+        assert_eq!(strip_prefix_ignore_case("AΩΩ text", "Figure"), None);
+
+        // Still strips a genuine ASCII-prefixed match.
+        assert_eq!(
+            strip_prefix_ignore_case("FIG. 3: caption text", "Fig."),
+            Some(" 3: caption text")
+        );
+    }
+
+    #[test]
+    fn is_caption_does_not_panic_on_multibyte_prefix_candidate() {
+        // A block that isn't actually a "Figure"/"Table"/"Fig." caption, but opens
+        // with a multi-byte character positioned to misalign a byte-length prefix
+        // check, must be classified rather than panicking.
+        assert!(!is_caption("AΩΩ text that just happens to start this way."));
     }
 }

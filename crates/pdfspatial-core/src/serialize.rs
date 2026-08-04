@@ -91,12 +91,127 @@ pub fn to_markdown(document: &Document) -> String {
 /// assert_eq!(to_markdown_structured(&doc, &regions), "# Title");
 /// ```
 pub fn to_markdown_structured(document: &Document, regions: &[Region]) -> String {
+    to_markdown_structured_with(document, regions, MarkdownOptions::default())
+}
+
+/// Output-shape switches for [`to_markdown_structured_with`] and [`to_markdown_pipeline`].
+///
+/// The library default (both fields `true`) is *faithful*: every page break and every
+/// detected picture is represented, matching [`to_markdown_structured`]'s frozen output
+/// exactly. The flags exist for downstream consumers -- e.g. a scoring harness that
+/// diffs plain text -- that treat Markdown syntax as document content and would
+/// otherwise penalize a thematic break or an image placeholder as inserted text. Turning
+/// a flag off discards information (page boundaries, or the presence of a picture), so
+/// prefer the default unless a specific consumer needs it.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::MarkdownOptions;
+///
+/// assert_eq!(MarkdownOptions::default(), MarkdownOptions { page_breaks: true, image_placeholders: true });
+///
+/// let compact = MarkdownOptions { page_breaks: false, ..Default::default() };
+/// assert!(!compact.page_breaks);
+/// assert!(compact.image_placeholders);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkdownOptions {
+    /// Separate pages with a Markdown thematic break (`---`). Default `true`.
+    pub page_breaks: bool,
+    /// Emit a `![]()` placeholder for each detected [`RegionClass::Picture`]. Default
+    /// `true`.
+    pub image_placeholders: bool,
+}
+
+impl Default for MarkdownOptions {
+    fn default() -> Self {
+        Self {
+            page_breaks: true,
+            image_placeholders: true,
+        }
+    }
+}
+
+/// As [`to_markdown_structured`], but honoring `options`. See [`MarkdownOptions`] for
+/// what each switch does and why the default differs from it.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::layout::{Region, RegionClass};
+/// use pdfspatial_core::serialize::to_markdown_structured_with;
+/// use pdfspatial_core::{BBox, Block, Document, Line, MarkdownOptions, Page, Word};
+///
+/// fn page(index: usize, text: &str) -> Page {
+///     let bbox = BBox { left: 0.0, bottom: 700.0, right: 500.0, top: 740.0 };
+///     let word = Word { text: text.into(), bbox, chars: vec![] };
+///     let line = Line { text: text.into(), bbox, words: vec![word] };
+///     Page { index, width: 612.0, height: 792.0, blocks: vec![Block { bbox, lines: vec![line] }], ..Default::default() }
+/// }
+/// let doc = Document { pages: vec![page(0, "Alpha"), page(1, "Beta")] };
+///
+/// let options = MarkdownOptions { page_breaks: false, ..Default::default() };
+/// assert_eq!(to_markdown_structured_with(&doc, &[], options), "Alpha\n\nBeta");
+/// ```
+pub fn to_markdown_structured_with(
+    document: &Document,
+    regions: &[Region],
+    options: MarkdownOptions,
+) -> String {
+    let separator = if options.page_breaks {
+        "\n\n---\n\n"
+    } else {
+        "\n\n"
+    };
     document
         .pages
         .iter()
-        .map(|page| render_page(page, regions))
+        .map(|page| render_page(page, regions, options))
+        // With page breaks off there is no separator carrying an empty page's "I exist"
+        // signal, so an empty render (a genuinely blank page) must be dropped here --
+        // otherwise adjacent separators collapse into a spurious blank-line run. With
+        // page breaks on, every page -- even an empty one -- keeps its own `---`, so
+        // nothing is filtered.
+        .filter(|rendered| options.page_breaks || !rendered.is_empty())
         .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
+        .join(separator)
+}
+
+/// Runs the full Stage 2/4a chain in one call: classifies `document`'s regions
+/// ([`crate::layout::classify_regions`]), reassembles reading order
+/// ([`crate::assemble::assemble_reading_order`]), and serializes the result
+/// ([`to_markdown_structured_with`]).
+///
+/// Classification runs on the *original* document, before reassembly: it operates on
+/// each block's own geometry (font size, position, shape) and doesn't depend on
+/// cross-block ordering, so the sequence doesn't affect its output. Serialization,
+/// though, uses the *reassembled* document's blocks matched back against those regions
+/// by IoU -- [`to_markdown_structured_with`]'s docs. That match is deliberately
+/// tolerant (see `MATCH_IOU_THRESHOLD`) rather than exact, because reassembly can union
+/// bounding boxes together (e.g. stitching a paragraph split across a page boundary),
+/// which nudges a block's bbox just enough that exact equality would silently drop the
+/// match.
+///
+/// # Examples
+///
+/// ```
+/// use pdfspatial_core::serialize::to_markdown_pipeline;
+/// use pdfspatial_core::{BBox, Block, Document, Line, MarkdownOptions, Page, Word};
+///
+/// let bbox = BBox { left: 0.0, bottom: 380.0, right: 500.0, top: 420.0 };
+/// let word = Word { text: "Hello".into(), bbox, chars: vec![] };
+/// let line = Line { text: "Hello".into(), bbox, words: vec![word] };
+/// let block = Block { bbox, lines: vec![line] };
+/// let page = Page { index: 0, width: 612.0, height: 792.0, blocks: vec![block], ..Default::default() };
+/// let doc = Document { pages: vec![page] };
+///
+/// assert_eq!(to_markdown_pipeline(&doc, MarkdownOptions::default()), "Hello");
+/// ```
+pub fn to_markdown_pipeline(document: &Document, options: MarkdownOptions) -> String {
+    let regions = layout::classify_regions(document);
+    let reordered = crate::assemble::assemble_reading_order(document);
+    to_markdown_structured_with(&reordered, &regions, options)
 }
 
 /// The minimum IoU between a block and a region for them to be considered "the same
@@ -107,9 +222,10 @@ const MATCH_IOU_THRESHOLD: f32 = 0.9;
 
 /// Renders one page: blocks claimed by a detected table are folded into a single GFM
 /// table at that table's position (top-y of its bbox); a picture region with no
-/// containing/overlapping block is inserted as its own item at its own position;
-/// everything else renders block-by-block via [`render_block`].
-fn render_page(page: &Page, regions: &[Region]) -> String {
+/// containing/overlapping block is inserted as its own item at its own position
+/// (unless `options.image_placeholders` is off); everything else renders block-by-block
+/// via [`render_block`].
+fn render_page(page: &Page, regions: &[Region], options: MarkdownOptions) -> String {
     enum Item<'a> {
         Block(&'a Block),
         Table(&'a Region),
@@ -150,8 +266,10 @@ fn render_page(page: &Page, regions: &[Region]) -> String {
         items.push((block.bbox.top, Item::Block(block)));
     }
 
-    for picture in &picture_regions {
-        items.push((picture.bbox.top, Item::Picture));
+    if options.image_placeholders {
+        for picture in &picture_regions {
+            items.push((picture.bbox.top, Item::Picture));
+        }
     }
 
     items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));

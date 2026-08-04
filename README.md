@@ -124,6 +124,52 @@ validated instead of eyeballed.
 For the full detail — per-stage exit criteria, the failure-mode taxonomy, and
 how the loop closes — see the [roadmap doc](docs/PDF-to-Markdown%20Pipeline%20Roadmap.md).
 
+## Benchmarks
+
+Scored against the real, external [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench)
+corpus (200 real-world PDFs, Apache-2.0) — every engine below re-run on one
+machine (Apple M2 Pro, macOS 15) on 2026-08-04 — alongside
+[`pdf-inspector`](https://github.com/firecrawl/pdf-inspector), the most
+directly analogous competitor (a dependency-light, model-free, deterministic
+Rust extractor):
+
+| Engine | Overall | Reading order (NID) | Table (TEDS) | Heading (MHS) | s/doc | License |
+|---|---|---|---|---|---|---|
+| pdf-inspector | 0.875 | 0.915 | 0.814 | 0.788 | 0.007s | MIT OR Apache-2.0 |
+| opendataloader | 0.831 | 0.902 | 0.489 | 0.739 | 0.014s | Apache-2.0 |
+| pdfspatial (compact) | 0.602 | 0.811 | 0.064 | 0.229 | 0.003s | MIT OR Apache-2.0 |
+| **pdfspatial** | **0.600** | **0.809** | **0.064** | **0.229** | **0.005s** | MIT OR Apache-2.0 |
+| markitdown | 0.589 | 0.844 | 0.273 | 0.000 | 0.125s | MIT |
+| liteparse | 0.582 | 0.873 | 0.000 | 0.000 | 2.683s | Apache-2.0 |
+
+The **pdfspatial** row (bold) is the headline: the library's default,
+faithful Markdown output (`---` page breaks, `![]()` picture placeholders).
+`pdfspatial (compact)` is the same binary run with `--no-page-breaks
+--no-image-placeholders`, isolating what that Markdown syntax costs against
+a scorer that treats it as document text — see "Known asymmetries" below.
+
+Two honest caveats before reading too much into the ranking:
+
+- **Speed isn't apples to apples.** `pdfspatial` runs the entire 200-PDF
+  corpus in **one process** (its CLI has a real batch mode); `pdf-inspector`'s
+  CLI has no batch mode and pays 200 process spawns inside the timer. Both are
+  real properties of the tools being measured, not something this harness
+  imposes — see [`bench/opendataloader/README.md`](bench/opendataloader/README.md).
+- **`evaluator_reading_order.py`'s NID only collapses whitespace** — it never
+  strips Markdown syntax, so `pdfspatial`'s faithful `---`/`![]()` output is
+  scored as inserted document text. TEDS is also `pdfspatial`'s weakest
+  column by a wide margin: tables are reconstructed from ruling lines
+  (`graphics::table_grid_cells`), so a borderless/whitespace-delimited table
+  produces no GFM table at all on some corpus documents — a known, tracked
+  limitation (`docs/pitfall_registry.json`'s `borderless_table` entry), not
+  measurement noise. MHS is structurally capped too: `to_markdown_structured`
+  only emits `#`/`##`, with no heading class for `###` or deeper.
+
+See [`bench/opendataloader/README.md`](bench/opendataloader/README.md) to
+reproduce this table (`./scripts/run-opendataloader-bench.sh`) and
+[`bench/opendataloader/results/results.json`](bench/opendataloader/results/results.json)
+for the raw numbers, hardware, and corpus revision behind it.
+
 ## Tech stack
 
 - **[Rust](https://www.rust-lang.org/)** (edition 2024, MSRV 1.85) — a single

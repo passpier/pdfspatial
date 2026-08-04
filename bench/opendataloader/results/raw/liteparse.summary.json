@@ -1,0 +1,9 @@
+{
+    "engine_name": "liteparse",
+    "engine_version": "1.2.1",
+    "processor": "Apple M2 Pro",
+    "document_count": 200,
+    "total_elapsed": 536.500687122345,
+    "elapsed_per_doc": 2.682503435611725,
+    "date": "2026-08-04"
+}

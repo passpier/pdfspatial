@@ -4,9 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`pdfspatial` is a Rust workspace with a single crate, `crates/pdfspatial-core`, implementing a
-four-stage PDF→Markdown pipeline (extraction → layout classification → reading-order assembly →
-serialization) grounded in spatial (bounding-box) extraction rather than layout guesswork.
+`pdfspatial` is a Rust workspace implementing a four-stage PDF→Markdown pipeline (extraction →
+layout classification → reading-order assembly → serialization) grounded in spatial
+(bounding-box) extraction rather than layout guesswork, plus a Stage 5 comparative-benchmarking
+gate that runs outside that loop. Two workspace members: `crates/pdfspatial-core` (the library —
+Stages 1-4) and `crates/pdfspatial-cli` (the `pdfspatial` binary — single-file and batch
+PDF→Markdown conversion, built on `pdfspatial-core::pdf_to_markdown` /
+`serialize::to_markdown_pipeline`; this is what Stage 5's bench harness drives).
 
 - Stage 1 (baseline extraction) and the algorithmic core of Stages 2/4 (metrics, heuristic layout
   classifier, XY-cut reading-order assembly, Markdown serializer) are fully implemented, pure,
@@ -24,6 +28,14 @@ serialization) grounded in spatial (bounding-box) extraction rather than layout 
   unimplemented and out of scope by design — not a bug or a TODO to silently fill in. (There is
   no literal `unimplemented!()` in the source; the gap is simply the absence of that code path.)
 - Propose a plan before implementing non-trivial changes rather than diving straight into code.
+- Stage 5 (`bench/opendataloader/`, `scripts/run-opendataloader-bench.sh`) benchmarks
+  `pdfspatial` against other local, model-free PDF→Markdown engines on the real,
+  external opendataloader-bench corpus (200 PDFs) and publishes a hardware-labelled
+  results table in `README.md`'s `## Benchmarks` section, backed by a committed
+  `bench/opendataloader/results/results.json`. **This never runs in CI** — it needs
+  `uv`/Python 3.13, network access, and an otherwise-idle machine for the speed column
+  to mean anything. See `bench/opendataloader/README.md` for the full methodology and
+  known scoring asymmetries before trusting the numbers too literally.
 
 ## Build, test, lint
 

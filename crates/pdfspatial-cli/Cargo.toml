@@ -1,0 +1,25 @@
+[package]
+name = "pdfspatial"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Command-line PDF-to-Markdown converter: spatially-grounded, deterministic, OCR-free."
+readme = "../../README.md"
+keywords = ["pdf", "markdown", "cli", "pdfium", "layout"]
+categories = ["command-line-utilities", "text-processing"]
+
+[[bin]]
+name = "pdfspatial"
+path = "src/main.rs"
+
+[dependencies]
+# `path` pins this to the in-tree core crate for local builds; the `version` requirement
+# is what a future crates.io release needs -- pdfspatial-core isn't published yet, so
+# `cargo publish --dry-run -p pdfspatial` can't pass until it is (core must publish
+# first). See ci.yml for the corresponding note on why this crate has no dry-run step.
+pdfspatial-core = { version = "0.1.0", path = "../pdfspatial-core" }
+rayon = "1"

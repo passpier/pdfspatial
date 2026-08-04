@@ -2,7 +2,7 @@
 
 ## Overview
 
-This roadmap defines a closed-loop, four-stage development cycle for a Rust-based PDF-to-Markdown pipeline built on [`pdfium-render`](https://github.com/ajrcarey/pdfium-render), the idiomatic Rust wrapper around Google's PDFium engine. `pdfium-render` binds to PDFium at run-time, extracts character-level bounding boxes via `PdfPageTextChar`, and can render page bitmaps for downstream vision-model inference — giving us both the "text layer" and "visual layer" needed for spatial document reconstruction ([GitHub: ajrcarey/pdfium-render](https://github.com/ajrcarey/pdfium-render), [pdfium-render#27: word-level bbox extraction](https://github.com/ajrcarey/pdfium-render/issues/27)).
+This roadmap defines a closed-loop, four-stage development cycle for a Rust-based PDF-to-Markdown pipeline built on [`pdfium-render`](https://github.com/ajrcarey/pdfium-render), the idiomatic Rust wrapper around Google's PDFium engine, plus a Stage 5 comparative-benchmarking gate that sits outside that loop (see below). `pdfium-render` binds to PDFium at run-time, extracts character-level bounding boxes via `PdfPageTextChar`, and can render page bitmaps for downstream vision-model inference — giving us both the "text layer" and "visual layer" needed for spatial document reconstruction ([GitHub: ajrcarey/pdfium-render](https://github.com/ajrcarey/pdfium-render), [pdfium-render#27: word-level bbox extraction](https://github.com/ajrcarey/pdfium-render/issues/27)).
 
 The architecture mirrors the proven pattern used by Docling's Rust backend — `pdfium` extracts text cells + renders page images, an object-detection stack classifies regions, and cells are reassembled in reading order into a structured document ([docs.rs: docling-pdf](https://docs.rs/docling-pdf/latest/docling_pdf/)).
 
@@ -29,7 +29,7 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
 |---|---|---|
 | **Character extraction recall** | % of ground-truth characters recovered vs. dropped (ligatures, embedded fonts, CID-keyed text) | ≥ 99% |
 | **Line-grouping accuracy** | % of lines correctly segmented by baseline clustering vs. manual annotation | ≥ 95% on single-column docs |
-| **Throughput** | Pages/sec on reference hardware (single core, no OCR) | Establish baseline; this becomes the perf floor for later stages |
+| **Throughput** | Pages/sec on reference hardware (single core, no OCR) | Established: **~333 pages/sec** (200 pages / 0.60s, Apple M2 Pro, single thread, `--jobs 1`) on the opendataloader-bench corpus's real-world PDFs — see [Stage 5](#stage-5--comparative-benchmarking). This is the perf floor for later stages, not a fixed target. |
 | **Reading-order edit distance** | Levenshtein distance between extracted token order and ground-truth order | Record only — this is expected to be poor on multi-column layouts and drives Stage 3 |
 
 **Exit criterion:** Character/word bbox extraction is lossless and fast on single-column, non-tabular PDFs (e.g., a plain-text arXiv preprint). Multi-column, tables, and formulas are *expected* to fail here — that failure surface is what Stage 3 characterizes.
@@ -180,9 +180,32 @@ scale.
 
 ---
 
+## Stage 5 — Comparative Benchmarking
+
+**Goal:** Measure end-to-end Markdown quality against other local, model-free PDF extractors on a real-world corpus — not just intrinsic fidelity against DocLayNet's own ground-truth boxes (Stage 2), but whether the *shipped* tool is actually competitive. Stage 2 asks "are our region boxes and table structure accurate against annotated ground truth?"; Stage 5 asks "does the Markdown we emit read as well as a competitor's, on PDFs nobody hand-picked for us?" Keeping the two separate preserves that distinction rather than diluting Stage 2 with an external corpus it wasn't designed around.
+
+**Corpus:** [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench) (Apache-2.0), 200 real-world PDFs with hand-authored ground-truth Markdown.
+
+**Metrics** (from the bench's own evaluator, `[0, 1]` unless noted):
+| Metric | What it scores |
+|---|---|
+| Overall | Mean of NID, TEDS, MHS per document, averaged across documents |
+| NID / NID-S | Reading-order text similarity (whitespace-normalized, table content included/excluded) |
+| TEDS / TEDS-S | Table structure similarity (tree-edit distance, content included/excluded) |
+| MHS / MHS-S | Heading-level sequence similarity |
+| s/doc | Wall time per document, single process, sequential |
+
+**Method:** `./scripts/run-opendataloader-bench.sh` clones the corpus, builds a release `pdfspatial` binary, registers it (and `pdfspatial-compact`, `pdf-inspector`) as bench engines without forking the upstream repo, runs every engine over all 200 PDFs, and collects `bench/opendataloader/results/results.json` plus the README table. See [`bench/opendataloader/README.md`](../bench/opendataloader/README.md) for the full methodology, engine list, and known scoring asymmetries (the bench's NID doesn't strip Markdown syntax; our TEDS/MHS are structurally capped by what `serialize::to_markdown_structured` emits today).
+
+**Non-goal:** Stage 5 does not gate merges, and it never runs in CI — it needs a multi-GB Python environment, network access, and an otherwise-idle machine for a speed number to mean anything (see the bench README). Run it per release, by hand, not per pull request.
+
+**Exit criterion:** None committed at 0.1.0 — the goal is a reproducible, hardware-labelled table checked into the repo, not a numeric threshold. A future iteration may set one once there's a baseline trend to compare against.
+
+---
+
 ## Closing the Loop
 
-After Stage 4, re-run the **full Stage 2 validation suite** on a fresh DocLayNet sample split (not the one used for fine-tuning) to confirm generalization, then return to Stage 3 error analysis on the new metric shortfalls. This is a continuous loop, not a linear pipeline — each iteration should:
+After Stage 4, re-run the **full Stage 2 validation suite** on a fresh DocLayNet sample split (not the one used for fine-tuning) to confirm generalization, then return to Stage 3 error analysis on the new metric shortfalls; re-run Stage 5 per release, independently of this loop's cadence. This is a continuous loop, not a linear pipeline — each iteration should:
 
 1. Re-run Stage 1 baseline only if pdfium extraction logic changed.
 2. Re-score Stage 2 metrics (TEDS-Struct, TEDS, GIoU, F1) on held-out data.
@@ -199,6 +222,7 @@ After Stage 4, re-run the **full Stage 2 validation suite** on a fresh DocLayNet
 | 3. Error Analysis | Failure count/category, root-cause split | Full pitfall-checklist coverage — **met**: 15/15 pitfalls seeded, root-cause-tagged, scoreboard-tracked (25/26 cases passing); ≥20-samples/category volume still outstanding |
 <!-- END GENERATED: pitfall-dashboard-row -->
 | 4. Refinement | Per-class GIoU/F1 delta, regression pass rate, throughput delta | 100% regression pass, <10% latency cost |
+| 5. Comparative Benchmarking | Overall/NID/TEDS/MHS + s/doc vs. external engines on opendataloader-bench | Reproducible, hardware-labelled table checked in; no numeric threshold committed at 0.1.0 |
 
 ---
 

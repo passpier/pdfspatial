@@ -1,0 +1,9 @@
+{
+    "engine_name": "pdf-inspector",
+    "engine_version": "0.1.7",
+    "processor": "Apple M2 Pro",
+    "document_count": 200,
+    "total_elapsed": 1.454477071762085,
+    "elapsed_per_doc": 0.007272385358810425,
+    "date": "2026-08-04"
+}

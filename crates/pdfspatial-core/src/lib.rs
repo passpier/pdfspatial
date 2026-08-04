@@ -2,7 +2,9 @@
 //!
 //! This crate is the foundation of the `pdfspatial` project: a closed-loop, four-stage
 //! pipeline that turns PDFs into Markdown by grounding every extracted token in its
-//! on-page bounding box. The stages are:
+//! on-page bounding box, plus a Stage 5 comparative-benchmarking gate that runs outside
+//! that loop (see `crates/pdfspatial-cli` and `bench/opendataloader/`). The four stages
+//! are:
 //!
 //! 1. **Baseline extraction** (implemented) — a deterministic, OCR-free text extraction
 //!    floor built directly on PDFium's native text layer, plus a graphics-layer pass
@@ -61,7 +63,36 @@ pub mod serialize;
 
 pub use extract::{PdfiumSource, extract_baseline, extract_baseline_with_source};
 pub use metrics::iou;
-pub use serialize::to_markdown_structured;
+pub use serialize::{MarkdownOptions, to_markdown_pipeline, to_markdown_structured};
+
+/// Converts the PDF at `path` to structural Markdown in one call: extraction
+/// ([`extract_baseline`]) followed by the full classify/reorder/serialize chain
+/// ([`serialize::to_markdown_pipeline`]).
+///
+/// This is the one-shot entry point for callers that just want Markdown out of a PDF
+/// path and don't need the intermediate [`Document`]. Callers that need the extracted
+/// structure too (region counts, per-page metrics, ...) should call [`extract_baseline`]
+/// and [`serialize::to_markdown_pipeline`] separately instead.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::Path;
+/// use pdfspatial_core::MarkdownOptions;
+///
+/// # fn main() -> Result<(), pdfspatial_core::PipelineError> {
+/// let markdown = pdfspatial_core::pdf_to_markdown(Path::new("input.pdf"), MarkdownOptions::default())?;
+/// println!("{markdown}");
+/// # Ok(())
+/// # }
+/// ```
+pub fn pdf_to_markdown(
+    path: &std::path::Path,
+    options: MarkdownOptions,
+) -> Result<String, PipelineError> {
+    let document = extract_baseline(path)?;
+    Ok(serialize::to_markdown_pipeline(&document, options))
+}
 
 /// Errors that can occur anywhere in the `pdfspatial` pipeline.
 #[derive(Debug, thiserror::Error)]

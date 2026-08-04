@@ -7,9 +7,10 @@
 //! environment.
 
 use pdfspatial_core::layout::classify_regions;
-use pdfspatial_core::serialize::to_markdown_structured;
+use pdfspatial_core::serialize::{to_markdown_pipeline, to_markdown_structured};
 use pdfspatial_core::{
-    BBox, Block, Char, Document, Line, Page, Word, assemble::assemble_reading_order,
+    BBox, Block, Char, Document, Line, MarkdownOptions, Page, Word,
+    assemble::assemble_reading_order,
 };
 
 fn char_run(text: &str, bbox: BBox, font_size: f32) -> Vec<Char> {
@@ -106,4 +107,21 @@ fn stage2_pipeline_reorders_columns_and_emits_structural_markdown() {
     let left_pos = markdown.find("Left column").unwrap();
     let right_pos = markdown.find("Right column").unwrap();
     assert!(left_pos < right_pos);
+}
+
+#[test]
+fn to_markdown_pipeline_matches_the_manual_classify_assemble_serialize_chain() {
+    let document = Document {
+        pages: vec![synthetic_two_column_page()],
+    };
+
+    // The manual chain this integration test already exercises above, expected to be
+    // exactly what `to_markdown_pipeline` does internally.
+    let regions = classify_regions(&document);
+    let reordered = assemble_reading_order(&document);
+    let manual = to_markdown_structured(&reordered, &regions);
+
+    let pipeline = to_markdown_pipeline(&document, MarkdownOptions::default());
+
+    assert_eq!(pipeline, manual);
 }
