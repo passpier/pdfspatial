@@ -2,11 +2,17 @@
   "corpus": "opendataloader-bench",
   "corpus_commit": "7af1d8f",
   "documents": 200,
-  "date": "2026-08-04",
+  "date": "2026-08-05",
   "hardware": {
     "processor": "Apple M2 Pro",
     "os": "Darwin 24.6.0 arm64",
     "jobs": 1
+  },
+  "versions": {
+    "pdfspatial_git_sha": "77ba43b",
+    "rustc": "1.97.1",
+    "python": "3.9.6",
+    "uv_lock_sha256_12": "f810e3309a16"
   },
   "engines": [
     {
@@ -21,7 +27,7 @@
       "teds_s": 0.866195645522535,
       "mhs": 0.7879482505111959,
       "mhs_s": 0.8666857133459662,
-      "s_per_doc": 0.007272385358810425,
+      "s_per_doc": 0.006771245002746582,
       "document_count": 200,
       "missing_predictions": 0,
       "processor": "Apple M2 Pro"
@@ -29,16 +35,16 @@
     {
       "name": "opendataloader",
       "display_name": "opendataloader",
-      "version": "2.2.1",
+      "version": "2.5.0",
       "license": "Apache-2.0",
-      "overall": 0.8312090061093924,
-      "nid": 0.9023157231108666,
-      "nid_s": 0.9049340253235694,
-      "teds": 0.4886923812957386,
-      "teds_s": 0.5128202498734807,
-      "mhs": 0.7394793823129436,
-      "mhs_s": 0.8252285098079492,
-      "s_per_doc": 0.014233874082565308,
+      "overall": 0.8419146558851182,
+      "nid": 0.9115090836154703,
+      "nid_s": 0.9157292905641649,
+      "teds": 0.4831169282847324,
+      "teds_s": 0.5058049437510318,
+      "mhs": 0.7570366507262226,
+      "mhs_s": 0.8367909349217761,
+      "s_per_doc": 0.016655246019363402,
       "document_count": 200,
       "missing_predictions": 0,
       "processor": "Apple M2 Pro"
@@ -55,7 +61,7 @@
       "teds_s": 0.11214328682648296,
       "mhs": 0.5102082563612278,
       "mhs_s": 0.6425489878760907,
-      "s_per_doc": 0.0028584253787994384,
+      "s_per_doc": 0.002543700933456421,
       "document_count": 200,
       "missing_predictions": 0,
       "processor": "Apple M2 Pro"
@@ -72,7 +78,7 @@
       "teds_s": 0.11214328682648296,
       "mhs": 0.5077456136025391,
       "mhs_s": 0.645108383309318,
-      "s_per_doc": 0.004420324563980103,
+      "s_per_doc": 0.0057757687568664555,
       "document_count": 200,
       "missing_predictions": 0,
       "processor": "Apple M2 Pro"
@@ -80,7 +86,7 @@
     {
       "name": "markitdown",
       "display_name": "markitdown",
-      "version": "0.1.5",
+      "version": "0.1.7",
       "license": "MIT",
       "overall": 0.5885041533548623,
       "nid": 0.8436602457220033,
@@ -89,7 +95,7 @@
       "teds_s": 0.32836632064334365,
       "mhs": 0.0,
       "mhs_s": 0.0,
-      "s_per_doc": 0.1250172448158264,
+      "s_per_doc": 0.10676867485046387,
       "document_count": 200,
       "missing_predictions": 0,
       "processor": "Apple M2 Pro"
@@ -97,7 +103,7 @@
     {
       "name": "liteparse",
       "display_name": "liteparse",
-      "version": "1.2.1",
+      "version": "2.11.0",
       "license": "Apache-2.0",
       "overall": 0.5816702288134801,
       "nid": 0.8729575900801337,
@@ -106,7 +112,7 @@
       "teds_s": 0.0,
       "mhs": 0.0,
       "mhs_s": 0.0,
-      "s_per_doc": 2.682503435611725,
+      "s_per_doc": 0.9171092748641968,
       "document_count": 200,
       "missing_predictions": 0,
       "processor": "Apple M2 Pro"

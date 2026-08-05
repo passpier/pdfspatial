@@ -34,7 +34,8 @@ PDF→Markdown conversion, built on `pdfspatial-core::pdf_to_markdown` /
   results table in `README.md`'s `## Benchmarks` section, backed by a committed
   `bench/opendataloader/results/results.json`. **This never runs in CI** — it needs
   `uv`/Python 3.13, network access, and an otherwise-idle machine for the speed column
-  to mean anything. See `bench/opendataloader/README.md` for the full methodology and
+  to mean anything. See `bench/opendataloader/README.md` for the reproduction
+  methodology and `docs/benchmark-analysis.md` for the metric-by-metric analysis and
   known scoring asymmetries before trusting the numbers too literally.
 
 ## Build, test, lint

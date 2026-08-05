@@ -22,6 +22,7 @@ so per-page numbers are a footnote, not a shared table column.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import subprocess
@@ -56,6 +57,39 @@ def _corpus_commit(bench_dir: Path) -> str:
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "unknown"
+
+
+def _git_sha(repo_dir: Path) -> str:
+    try:
+        return (
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            .stdout.strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def _rustc_version() -> str:
+    try:
+        out = subprocess.run(
+            ["rustc", "--version"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        # "rustc 1.85.0 (...)" -> "1.85.0"
+        return out.split()[1] if len(out.split()) > 1 else out
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def _uv_lock_hash(bench_dir: Path) -> str:
+    lock_path = bench_dir / "uv.lock"
+    if not lock_path.is_file():
+        return "unknown"
+    return hashlib.sha256(lock_path.read_bytes()).hexdigest()[:12]
 
 
 def _load_engine(bench_dir: Path, engine: str) -> dict | None:
@@ -130,6 +164,18 @@ def main() -> int:
             "processor": processor,
             "os": f"{platform.system()} {platform.release()} {platform.machine()}",
             "jobs": args.jobs,
+        },
+        # Provenance for "is this stale?" without re-running: the pdfspatial commit
+        # this binary was built from, the toolchain that built it, the Python
+        # interpreter the comparison engines ran under, and a hash of the upstream
+        # clone's uv.lock (the actual source of truth for engine versions, since
+        # engine_registry.py's own literals are overridden at run time -- see
+        # registry_patch.py).
+        "versions": {
+            "pdfspatial_git_sha": _git_sha(REPO_ROOT),
+            "rustc": _rustc_version(),
+            "python": platform.python_version(),
+            "uv_lock_sha256_12": _uv_lock_hash(bench_dir),
         },
         "engines": engines,
     }

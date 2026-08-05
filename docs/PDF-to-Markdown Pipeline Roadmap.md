@@ -29,7 +29,7 @@ PDF → [pdfium: char/word bboxes + page raster] → [Layout Model: region class
 |---|---|---|
 | **Character extraction recall** | % of ground-truth characters recovered vs. dropped (ligatures, embedded fonts, CID-keyed text) | ≥ 99% |
 | **Line-grouping accuracy** | % of lines correctly segmented by baseline clustering vs. manual annotation | ≥ 95% on single-column docs |
-| **Throughput** | Pages/sec on reference hardware (single core, no OCR) | Established: **~333 pages/sec** (200 pages / 0.60s, Apple M2 Pro, single thread, `--jobs 1`) on the opendataloader-bench corpus's real-world PDFs — see [Stage 5](#stage-5--comparative-benchmarking). This is the perf floor for later stages, not a fixed target. |
+| **Throughput** | Pages/sec on reference hardware (single core, no OCR) | Record only — Stage 5's `s/doc` column (currently ~0.006s/doc for `pdfspatial`, Apple M2 Pro, single thread, `--jobs 1`) is measured per-document, not per-page, since page counts aren't uniformly available across every comparison engine's output; see [`docs/benchmark-analysis.md`](benchmark-analysis.md#speed-sdoc). This is the perf floor for later stages, not a fixed target. |
 | **Reading-order edit distance** | Levenshtein distance between extracted token order and ground-truth order | Record only — this is expected to be poor on multi-column layouts and drives Stage 3 |
 
 **Exit criterion:** Character/word bbox extraction is lossless and fast on single-column, non-tabular PDFs (e.g., a plain-text arXiv preprint). Multi-column, tables, and formulas are *expected* to fail here — that failure surface is what Stage 3 characterizes.
@@ -194,7 +194,7 @@ scale.
 | MHS / MHS-S | Heading-level sequence similarity |
 | s/doc | Wall time per document, single process, sequential |
 
-**Method:** `./scripts/run-opendataloader-bench.sh` clones the corpus, builds a release `pdfspatial` binary, registers it (and `pdfspatial-compact`, `pdf-inspector`) as bench engines without forking the upstream repo, runs every engine over all 200 PDFs, and collects `bench/opendataloader/results/results.json` plus the README table. See [`bench/opendataloader/README.md`](../bench/opendataloader/README.md) for the full methodology, engine list, and known scoring asymmetries (the bench's NID doesn't strip Markdown syntax; our TEDS/MHS are structurally capped by what `serialize::to_markdown_structured` emits today).
+**Method:** `./scripts/run-opendataloader-bench.sh` clones the corpus, builds a release `pdfspatial` binary, registers it (and `pdfspatial-compact`, `pdf-inspector`) as bench engines without forking the upstream repo, runs every engine over all 200 PDFs, and collects `bench/opendataloader/results/results.json` plus the README table. See [`bench/opendataloader/README.md`](../bench/opendataloader/README.md) for the reproduction methodology and engine list, and [`docs/benchmark-analysis.md`](benchmark-analysis.md) for the metric-by-metric read of the results — including why the bench's NID doesn't strip Markdown syntax and the two tracked, still-open causes of the weak TEDS column (`docs/pitfall_registry.json`'s `borderless_table`/`multi_line_table_cell`); MHS is **not** capped by heading depth, contrary to an earlier claim here.
 
 **Non-goal:** Stage 5 does not gate merges, and it never runs in CI — it needs a multi-GB Python environment, network access, and an otherwise-idle machine for a speed number to mean anything (see the bench README). Run it per release, by hand, not per pull request.
 

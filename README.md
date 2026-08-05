@@ -32,9 +32,7 @@ model-shaped — see [Status](#status).
 | Table/picture detection from ruling lines & embedded images (`graphics`) | ✅ Stable |
 | Structural Markdown serialization (incl. GFM tables, image placeholders) | ✅ Stable |
 | Validation metrics (TEDS, GIoU, region F1) against DocLayNet | ✅ Stable |
-<!-- BEGIN GENERATED: pitfall-status-row -->
 | Regression corpus of known failure modes (26 seeded cases) | ✅ Stable |
-<!-- END GENERATED: pitfall-status-row -->
 | Formula detection (`RegionClass::Formula`) | 🚧 Partial — display (block-level) formulas classified via a geometric heuristic (`layout::is_display_formula`: centered, narrow, isolated, symbol-dense); *inline* formulas embedded mid-sentence still need an ONNX runtime + model weights, out of scope for now |
 
 See [`docs/PDF-to-Markdown Pipeline Roadmap.md`](docs/PDF-to-Markdown%20Pipeline%20Roadmap.md)
@@ -128,57 +126,39 @@ how the loop closes — see the [roadmap doc](docs/PDF-to-Markdown%20Pipeline%20
 
 Scored against the real, external [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench)
 corpus (200 real-world PDFs, Apache-2.0) — every engine below re-run on one
-machine (Apple M2 Pro, macOS 15) on 2026-08-04 — alongside
-[`pdf-inspector`](https://github.com/firecrawl/pdf-inspector), the most
-directly analogous competitor (a dependency-light, model-free, deterministic
-Rust extractor):
+machine (Apple M2 Pro, macOS 15) on 2026-08-05, each at its latest stable
+release — alongside [`pdf-inspector`](https://github.com/firecrawl/pdf-inspector),
+the most directly analogous competitor (a dependency-light, model-free,
+deterministic Rust extractor):
 
 | Engine | Overall | Reading order (NID) | Table (TEDS) | Heading (MHS) | s/doc | License |
 |---|---|---|---|---|---|---|
 | pdf-inspector | 0.875 | 0.915 | 0.814 | 0.788 | 0.007s | MIT OR Apache-2.0 |
-| opendataloader | 0.831 | 0.902 | 0.489 | 0.739 | 0.014s | Apache-2.0 |
+| opendataloader | 0.842 | 0.912 | 0.483 | 0.757 | 0.017s | Apache-2.0 |
 | pdfspatial (compact) | 0.679 | 0.820 | 0.079 | 0.510 | 0.003s | MIT OR Apache-2.0 |
-| **pdfspatial** | **0.677** | **0.817** | **0.079** | **0.508** | **0.004s** | MIT OR Apache-2.0 |
-| markitdown | 0.589 | 0.844 | 0.273 | 0.000 | 0.125s | MIT |
-| liteparse | 0.582 | 0.873 | 0.000 | 0.000 | 2.683s | Apache-2.0 |
+| **pdfspatial** | **0.677** | **0.817** | **0.079** | **0.508** | **0.006s** | MIT OR Apache-2.0 |
+| markitdown | 0.589 | 0.844 | 0.273 | 0.000 | 0.107s | MIT |
+| liteparse | 0.582 | 0.873 | 0.000 | 0.000 | 0.917s | Apache-2.0 |
 
 The **pdfspatial** row (bold) is the headline: the library's default,
 faithful Markdown output (`---` page breaks, `![]()` picture placeholders).
-`pdfspatial (compact)` is the same binary run with `--no-page-breaks
---no-image-placeholders`, isolating what that Markdown syntax costs against
-a scorer that treats it as document text — see "Known asymmetries" below.
+`pdfspatial (compact)` drops that syntax to isolate its cost against the
+scorer (see the analysis doc below).
 
-Two honest caveats before reading too much into the ranking:
+`pdfspatial` is the fastest engine measured and lands mid-pack on Overall,
+carried down mainly by its weakest column, Table (TEDS) — a real, tracked
+gap (`docs/pitfall_registry.json`'s `borderless_table`/`multi_line_table_cell`
+entries), not measurement noise. `pdf-inspector` and `opendataloader` score
+higher overall but pay for it in speed (`pdf-inspector` also has no batch
+mode, so its number is 200 process spawns inside the timer, not one).
 
-- **Speed isn't apples to apples.** `pdfspatial` runs the entire 200-PDF
-  corpus in **one process** (its CLI has a real batch mode); `pdf-inspector`'s
-  CLI has no batch mode and pays 200 process spawns inside the timer. Both are
-  real properties of the tools being measured, not something this harness
-  imposes — see [`bench/opendataloader/README.md`](bench/opendataloader/README.md).
-- **Overall is a ragged mean, not the average of the three published
-  columns.** `evaluator.py` scores TEDS/MHS as `None` (excluded from the
-  mean, not scored zero) on a document whose ground truth has no
-  table/heading at all — TEDS is scored on only 42 of the 200 documents,
-  MHS on 107. So Overall can't be reconstructed from NID/TEDS/MHS by hand;
-  see `bench/opendataloader/README.md` for the exact per-document formula.
-  `evaluator_reading_order.py`'s NID also only collapses whitespace — it
-  never strips Markdown syntax, so `pdfspatial`'s faithful `---`/`![]()`
-  output is scored as inserted document text, though the measured cost of
-  that is small (compact vs. default differ by ~0.002 Overall, ~0.003 NID).
-  TEDS is `pdfspatial`'s weakest column by a wide margin — a real, tracked
-  gap (`docs/pitfall_registry.json`'s `borderless_table`/
-  `multi_line_table_cell` entries), not measurement noise: real Stage 1
-  block grouping sometimes merges a table row's cells across the column gap
-  before the ruling-line grid ever sees them as separate cells. MHS is
-  *not* capped by only emitting `#`/`##` — the evaluator's own heading tree
-  treats every level as equivalent, and this corpus's ground truth contains
-  no heading deeper than `#` anyway — the real driver was headings trapped
-  as an interior line of a merged paragraph block, not a missing `###`.
-
-See [`bench/opendataloader/README.md`](bench/opendataloader/README.md) to
-reproduce this table (`./scripts/run-opendataloader-bench.sh`) and
+For what each column actually measures, why Overall isn't the average of
+the other three, and the full accounting of every scoring asymmetry, see
+[`docs/benchmark-analysis.md`](docs/benchmark-analysis.md). To reproduce
+this table, see [`bench/opendataloader/README.md`](bench/opendataloader/README.md)
+(`./scripts/run-opendataloader-bench.sh`) and
 [`bench/opendataloader/results/results.json`](bench/opendataloader/results/results.json)
-for the raw numbers, hardware, and corpus revision behind it.
+for the raw numbers, hardware, versions, and corpus revision behind it.
 
 ## Tech stack
 

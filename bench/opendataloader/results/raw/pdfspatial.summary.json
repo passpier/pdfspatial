@@ -3,7 +3,7 @@
     "engine_version": "0.1.0",
     "processor": "Apple M2 Pro",
     "document_count": 200,
-    "total_elapsed": 0.8840649127960205,
-    "elapsed_per_doc": 0.004420324563980103,
-    "date": "2026-08-04"
+    "total_elapsed": 1.155153751373291,
+    "elapsed_per_doc": 0.0057757687568664555,
+    "date": "2026-08-05"
 }

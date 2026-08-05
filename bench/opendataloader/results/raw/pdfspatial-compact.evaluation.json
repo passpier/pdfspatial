@@ -4,9 +4,9 @@
     "engine_version": "0.1.0",
     "processor": "Apple M2 Pro",
     "document_count": 200,
-    "total_elapsed": 0.5716850757598877,
-    "elapsed_per_doc": 0.0028584253787994384,
-    "date": "2026-08-04"
+    "total_elapsed": 0.5087401866912842,
+    "elapsed_per_doc": 0.002543700933456421,
+    "date": "2026-08-05"
   },
   "metrics": {
     "score": {
@@ -2626,8 +2626,8 @@
     }
   ],
   "speed": {
-    "total_elapsed": 0.5716850757598877,
-    "elapsed_per_doc": 0.0028584253787994384,
+    "total_elapsed": 0.5087401866912842,
+    "elapsed_per_doc": 0.002543700933456421,
     "document_count": 200,
     "processor": "Apple M2 Pro"
   }

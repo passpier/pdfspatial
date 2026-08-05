@@ -1,12 +1,12 @@
 {
   "summary": {
     "engine_name": "markitdown",
-    "engine_version": "0.1.5",
+    "engine_version": "0.1.7",
     "processor": "Apple M2 Pro",
     "document_count": 200,
-    "total_elapsed": 25.003448963165283,
-    "elapsed_per_doc": 0.1250172448158264,
-    "date": "2026-08-04"
+    "total_elapsed": 21.353734970092773,
+    "elapsed_per_doc": 0.10676867485046387,
+    "date": "2026-08-05"
   },
   "metrics": {
     "score": {
@@ -2626,8 +2626,8 @@
     }
   ],
   "speed": {
-    "total_elapsed": 25.003448963165283,
-    "elapsed_per_doc": 0.1250172448158264,
+    "total_elapsed": 21.353734970092773,
+    "elapsed_per_doc": 0.10676867485046387,
     "document_count": 200,
     "processor": "Apple M2 Pro"
   }

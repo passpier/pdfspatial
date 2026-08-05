@@ -96,42 +96,12 @@ apples; a multi-job number, if recorded, is a separate footnote, not the table's
 
 ## Known asymmetries (read before trusting the table too literally)
 
-- **`evaluator_reading_order.py`'s `_normalize` only collapses whitespace** — it never
-  strips Markdown syntax. `pdfspatial`'s faithful default emits a `---` thematic break
-  between every page and a `![]()` placeholder for every detected picture; both count as
-  inserted document text against ground truth. The `pdfspatial-compact` row exists to
-  isolate exactly this cost -- measured on this corpus, it's small: compact vs. default
-  differ by ~0.002 Overall and ~0.003 NID, not the dominant factor a naive reading of
-  "Markdown syntax is scored as document text" might suggest.
-- **MHS is *not* structurally capped by only emitting `#`/`##`.** An earlier revision of
-  this doc claimed `serialize::to_markdown_structured` emitting no `RegionClass` past
-  `##` caps MHS whenever a ground-truth document has a third heading level. That's wrong
-  on inspection of `evaluator_heading_level.py`: its `HeadingTree` discards the `#`-count
-  entirely and treats every heading level as structurally equivalent (see its own module
-  docstring). Separately, this corpus's ground truth (`generate_groundtruth_markdown.py`)
-  only ever emits a level-1 `#` — there is no `##`+ anywhere in the 200 reference files —
-  so heading depth was never actually in play here. The real driver of a low MHS score
-  was headings **trapped as an interior line of a merged Stage 1 paragraph block**
-  (never becoming their own block, so `classify_block`'s heading rules — which only ever
-  fire on a whole block — never saw them). `layout::split_blocks_at_style_breaks` closes
-  most of that gap as a Stage 2 pre-pass.
-- **TEDS is `pdfspatial`'s weakest column by a wide margin, and the gap is real, not
-  measurement noise.** Two distinct causes, both tracked in
-  `docs/pitfall_registry.json`: a borderless/whitespace-delimited table producing no GFM
-  table at all on some documents (the `borderless_table` pitfall -- partially closed by
-  merging adjacent compatible row bands into one multi-row table instead of N
-  degenerate one-row tables), and real Stage 1 block grouping sometimes merging a
-  bordered table's row cells across the column gap into one block before
-  `graphics::table_grid_cells` ever sees them as separate cells (the
-  `multi_line_table_cell` pitfall -- still open; needs a Stage 1 `extract.rs` change,
-  documented as `blocked` in the registry).
-- **`PageHeader`/`PageFooter` regions are dropped entirely** from `pdfspatial`'s
-  structured output. Depending on whether the bench's own ground truth retains running
-  headers/footers, this cuts for or against us; check a few ground-truth files directly
-  if this matters for your read of the numbers.
-- **Thermal throttling.** A multi-hour, multi-engine run on a single laptop can make
-  later engines look slower for reasons that have nothing to do with the engine.
-  `s/doc` here is order-of-magnitude evidence, not a precision benchmark result.
+The metric-by-metric analysis — why NID scores `pdfspatial`'s Markdown syntax as
+inserted text, the two tracked causes behind its weak TEDS column, why MHS isn't
+capped by heading depth, the speed asymmetry between batch and per-document CLIs, and
+what this benchmark doesn't measure at all — lives in
+[`docs/benchmark-analysis.md`](../../docs/benchmark-analysis.md), not here. This file
+stays scoped to reproduction methodology.
 
 ## `results/results.json`
 
@@ -139,8 +109,18 @@ Committed after every real run, alongside the engines' raw
 `prediction/<engine>/evaluation.json` copies under `results/raw/` (not automated by
 `collect.py` today — copy them by hand if you want them preserved past the next
 `third_party/` clean). Records `corpus_commit` (the upstream clone's own git SHA),
-`documents`, `date`, a `hardware` block (`processor`, `os`, `jobs`), and one entry per
-engine with every metric above. `hardware` and `corpus_commit` are non-negotiable: every
-number in the README table is machine- and corpus-revision-specific, and without them
-the table is unfalsifiable. `crates/pdfspatial-core/tests/stage5_bench_results.rs`
+`documents`, `date`, a `hardware` block (`processor`, `os`, `jobs`), a `versions` block
+(`pdfspatial_git_sha`, `rustc`, `python`, `uv_lock_sha256_12` -- see below), and one
+entry per engine with every metric above, including that engine's real installed
+`version` (read from `importlib.metadata`/`cargo install --list` at run time by
+`registry_patch.py`, not the possibly-stale literal upstream's own
+`engine_registry.py` hardcodes). `hardware` and `corpus_commit` are non-negotiable:
+every number in the README table is machine- and corpus-revision-specific, and without
+them the table is unfalsifiable. `crates/pdfspatial-core/tests/stage5_bench_results.rs`
 checks the README table against this file.
+
+`versions.uv_lock_sha256_12` is a fingerprint of the upstream clone's `uv.lock` at
+collection time -- the actual pin for every Python engine's full dependency tree, which
+this repo doesn't vendor. If a future run's per-engine `version` fields match today's
+but this hash differs, something in the dependency tree moved without a version bump
+visible in the table.

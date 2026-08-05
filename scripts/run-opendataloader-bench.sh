@@ -6,7 +6,8 @@
 # Usage:
 #   scripts/run-opendataloader-bench.sh [--dest DIR] [--engines LIST] [--doc-id ID]
 #                                       [--skip-clone] [--skip-build] [--skip-sync]
-#                                       [--force] [--collect-only] [--jobs N] [--help]
+#                                       [--force] [--collect-only] [--jobs N]
+#                                       [--no-upgrade] [--help]
 #
 # Env overrides:
 #   BENCH_REPO              git URL to clone (default: opendataloader-project/opendataloader-bench)
@@ -35,11 +36,12 @@ skip_sync=0
 force=0
 collect_only=0
 jobs=1
+upgrade=1
 
 usage() {
     cat <<EOF
 Usage: $0 [--dest DIR] [--engines LIST] [--doc-id ID] [--skip-clone] [--skip-build]
-          [--skip-sync] [--force] [--collect-only] [--jobs N] [--help]
+          [--skip-sync] [--force] [--collect-only] [--jobs N] [--no-upgrade] [--help]
 
 Clones opendataloader-bench (200 real PDFs + ground truth, no LFS pull required as of
 this writing -- see bench/opendataloader/README.md), builds the release pdfspatial
@@ -58,6 +60,10 @@ each engine in --engines over the corpus, and collects results.
   --jobs N           Worker threads for pdfspatial's headline row (default: 1, matching
                       every comparison engine's single-process, sequential-document
                       execution -- see bench/opendataloader/README.md)
+  --no-upgrade       Skip \`uv sync --upgrade\`; reuse whatever the bench's uv.lock
+                      already resolves to instead of re-resolving to latest stable
+                      (upstream pyproject.toml uses >= bounds only, so a plain
+                      \`uv sync\` can silently keep old versions around).
   --help             Show this help.
 EOF
 }
@@ -77,6 +83,7 @@ while [ $# -gt 0 ]; do
         --collect-only) collect_only=1; shift ;;
         --jobs) jobs=$2; shift 2 ;;
         --jobs=*) jobs=${1#--jobs=}; shift ;;
+        --no-upgrade) upgrade=0; shift ;;
         --help | -h) usage; exit 0 ;;
         *)
             echo "run-opendataloader-bench.sh: unknown argument: $1" >&2
@@ -133,8 +140,15 @@ if [ "$collect_only" -eq 0 ]; then
 
     # --- 2. Python environment ------------------------------------------------------
     if [ "$skip_sync" -eq 0 ]; then
-        log "uv sync (base + opendataloader + markitdown + liteparse extras)"
-        (cd "$dest" && uv sync --extra opendataloader --extra markitdown --extra liteparse)
+        sync_args="--extra opendataloader --extra markitdown --extra liteparse"
+        if [ "$upgrade" -eq 1 ]; then
+            sync_args="$sync_args --upgrade"
+            log "uv sync --upgrade (base + opendataloader + markitdown + liteparse extras," \
+                "re-resolving to latest stable -- pass --no-upgrade to keep uv.lock as-is)"
+        else
+            log "uv sync (base + opendataloader + markitdown + liteparse extras)"
+        fi
+        (cd "$dest" && uv sync $sync_args)
     fi
 
     # --- 3. Build the release pdfspatial binary --------------------------------------
@@ -185,6 +199,20 @@ if [ "$collect_only" -eq 0 ]; then
     fi
     export PDF_INSPECTOR_BIN
     log "PDF_INSPECTOR_BIN=$PDF_INSPECTOR_BIN"
+
+    # pdf2md itself has no --version flag; ask cargo what it actually installed instead
+    # of trusting a hardcoded string (see registry_patch.py, which reads this env var).
+    PDF_INSPECTOR_VERSION=$(cargo install --list 2>/dev/null \
+        | grep -o 'pdf-inspector v[0-9][0-9.]*' | head -n1 | sed 's/pdf-inspector v//')
+    export PDF_INSPECTOR_VERSION
+    log "PDF_INSPECTOR_VERSION=${PDF_INSPECTOR_VERSION:-unknown}"
+
+    # pdfspatial's own version, from the workspace Cargo.toml -- also read by
+    # registry_patch.py, so results.json's `version` field can't drift from what was
+    # actually built into $PDFSPATIAL_BIN above.
+    PDFSPATIAL_VERSION=$(grep -m1 '^version' "$repo_root/Cargo.toml" | sed -E 's/version *= *"([^"]+)"/\1/')
+    export PDFSPATIAL_VERSION
+    log "PDFSPATIAL_VERSION=${PDFSPATIAL_VERSION:-unknown}"
 
     # --- 5. Register pdfspatial/pdfspatial-compact/pdf-inspector as bench engines ----
     cp "$repo_root"/bench/opendataloader/adapters/*.py "$dest/src/"
